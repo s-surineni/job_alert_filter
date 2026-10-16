@@ -1,0 +1,69 @@
+================================================================================
+From: jobalerts-noreply@linkedin.com
+Subject: LinkedIn Job Alert: 3 new Frontend Engineer jobs in Remote
+Date: Mon, 12 Oct 2026 09:30:00 +0000
+================================================================================
+Hi Alex,
+
+Here are new job recommendations matching your preferences:
+
+Job Title: Senior Frontend Engineer (React / TypeScript)
+Company: Vercel
+Location: Remote (US / Global)
+Salary: $150k - $185k / year
+Apply URL: https://vercel.com/careers/senior-frontend-react
+Snippet: We are seeking a senior frontend engineer with deep expertise in Next.js, React Server Components, and performance profiling.
+
+--------------------------------------------------------------------------------
+From: alerts@indeed.com
+Subject: Indeed Job Alert: Vue & Web Developer openings
+Date: Tue, 13 Oct 2026 14:15:00 +0000
+--------------------------------------------------------------------------------
+New opening matching your search:
+
+Role: Frontend Web Developer (Vue 3 & Tailwind)
+Company: Creative Studio Inc
+Location: Remote
+Compensation: $75 - $95/hr
+Link: https://creativestudio.example.com/jobs/vue-developer
+Description: Contract-to-hire opportunity for an experienced frontend UI engineer to modernize our client dashboard. 40 hours/week.
+
+--------------------------------------------------------------------------------
+From: recruitment@stripe.com
+Subject: Role Opportunity: Staff Front-End Architect at Stripe
+Date: Wed, 14 Oct 2026 11:00:00 +0000
+--------------------------------------------------------------------------------
+Hi Alex,
+
+I came across your profile and thought you would be a great fit for our team.
+
+Position: Staff Front-End Architect
+Company: Stripe
+Location: San Francisco, CA / Remote
+Salary: $210,000 - $260,000 per year + Equity
+Contact / Application: https://stripe.com/jobs/staff-frontend-architect
+Details: Drive frontend platform infrastructure across multiple payments product surfaces using React and TypeScript design systems.
+
+--------------------------------------------------------------------------------
+From: notifications@wellfound.com
+Subject: Wellfound Alert: Lead UI/UX Engineer at HyperScale AI
+Date: Wed, 14 Oct 2026 16:45:00 +0000
+--------------------------------------------------------------------------------
+Title: Lead UI Engineer
+Company: HyperScale AI
+Location: New York, NY (Hybrid)
+Salary: Competitive / Equity based on experience
+Apply: https://wellfound.com/jobs/lead-ui-engineer-hyperscale
+Summary: Build cutting-edge data visualization interfaces for LLM evaluation. Frontend leadership experience required.
+
+--------------------------------------------------------------------------------
+From: noreply@ziprecruiter.com
+Subject: ZipRecruiter Alert: Senior Backend Infrastructure Engineer
+Date: Thu, 15 Oct 2026 02:00:00 +0000
+--------------------------------------------------------------------------------
+Position: Senior Backend Engineer (Distributed Systems / Go)
+Company: CloudScale Infrastructure
+Location: Austin, TX
+Salary: $170,000 - $205,000 / year
+Apply: https://cloudscale.example.com/apply/backend
+Note: Design high-throughput Kafka streaming pipelines and gRPC services.

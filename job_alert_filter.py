@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import html
 import json
 import os
 import re
@@ -154,8 +155,15 @@ class LocalFileEmailSource(EmailSource):
         body_part = msg.get_body(preferencelist=("plain", "html"))
         body = body_part.get_content() if body_part else ""
         
-        # If html only, strip tags for clean text parsing
+        # If html only, extract hyperlinks and strip tags for clean text parsing
         if body_part and body_part.get_content_subtype() == "html":
+            # Preserve target URLs from anchor tags: <a href="url">text</a> -> text (url)
+            body = re.sub(
+                r'<a\s+[^>]*href=["\']([^"\']+)["\'][^>]*>(.*?)</a>',
+                r'\2 (\1)',
+                body,
+                flags=re.IGNORECASE | re.DOTALL
+            )
             body = re.sub(r"<[^>]+>", " ", body)
 
         return RawEmail(
@@ -167,14 +175,26 @@ class LocalFileEmailSource(EmailSource):
         )
 
     def _read_json_file(self, file_path: Path) -> List[RawEmail]:
-        with open(file_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            return []
+
         emails = []
         items = data if isinstance(data, list) else [data]
         for idx, item in enumerate(items):
+            if not isinstance(item, dict):
+                continue
+            body = item.get("body") or item.get("content") or ""
+            has_subject = bool(item.get("subject"))
+            has_sender = bool(item.get("from") or item.get("sender"))
+            # Require at least an email body or both subject and sender to qualify as an email
+            if not body and not (has_subject and has_sender):
+                continue
             emails.append(RawEmail(
                 subject=item.get("subject", f"Alert #{idx+1}"),
-                body=item.get("body", "") or item.get("content", ""),
+                body=body,
                 sender=item.get("from") or item.get("sender"),
                 date=item.get("date"),
                 source_identifier=f"{file_path.name}#{idx+1}"
@@ -278,17 +298,23 @@ class JobParser:
 
     # Regex patterns for field extraction
     TITLE_PATTERNS = [
-        re.compile(r"(?:Job Title|Position|Role|Title)\s*[:\-]\s*([^\n\r]+)", re.IGNORECASE),
-        re.compile(r"^(?:Senior|Staff|Lead|Principal|Junior)?\s*(?:Frontend|Front-end|Front End|React|Vue|Angular|UI|Web)\s+(?:Engineer|Developer|Architect)[^\n\r]*$", re.IGNORECASE | re.MULTILINE),
+        re.compile(r"^(?:Job Title|Position|Role|Title)\s*[:\-]\s*([^\n\r]+)", re.IGNORECASE | re.MULTILINE),
+        re.compile(r"^((?:Senior|Staff|Lead|Principal|Junior)?\s*(?:Software\s+)?(?:Frontend|Front-end|Front End|React|Vue|Angular|UI|Web)\s+(?:Engineer|Developer|Architect|Specialist)[^\n\r]*)$", re.IGNORECASE | re.MULTILINE),
+        re.compile(r"^((?:Senior|Staff|Lead|Principal|Junior)?\s*(?:Software\s+Engineer|Developer|Architect)\s*[-–—:]\s*(?:Frontend|Front-end|Front End|React|Vue|Angular|UI|Web)[^\n\r]*)$", re.IGNORECASE | re.MULTILINE),
+        re.compile(r"^((?:Senior|Staff|Lead|Principal|Junior)?\s*(?:Member of Technical Staff|MTS)\s*[-–—:]\s*[^\n\r]+)$", re.IGNORECASE | re.MULTILINE),
+        re.compile(r"^((?:Senior|Staff|Lead|Principal|Junior)?\s*(?:UI|Frontend|Front-end|React|Vue|Angular)[_\-](?:Engineer|Developer|Architect)[^\n\r]*)$", re.IGNORECASE | re.MULTILINE),
+        re.compile(r"^((?:React|Vue|Angular|Frontend|Front-End|UI)\s+Developer[^\n\r]*)$", re.IGNORECASE | re.MULTILINE),
     ]
 
     COMPANY_PATTERNS = [
-        re.compile(r"(?:Company|Employer|Organization|Hiring Company)\s*[:\-]\s*([^\n\r]+)", re.IGNORECASE),
+        re.compile(r"^\s*(?:Company|Employer|Organization|Hiring Company)\s*[:\-]\s*([^\n\r]+)", re.IGNORECASE | re.MULTILINE),
+        re.compile(r"^\s*Posted by\s+([^\n\r.]+)", re.IGNORECASE | re.MULTILINE),
+        re.compile(r"^\s*(?:Hiring for|Client of)\s+([^\n\r.]+)", re.IGNORECASE | re.MULTILINE),
         re.compile(r"(?:at|@)\s+([A-Z][A-Za-z0-9\s&,\.\-]{1,30}?)(?:\s+(?:is hiring|in\b|Location|\-|\())", re.MULTILINE),
     ]
 
     URL_PATTERNS = [
-        re.compile(r"(?:Apply(?:\s*URL)?|Link|URL|Application|Contact)\s*[:\-]\s*(https?://[^\s<>\"']+)", re.IGNORECASE),
+        re.compile(r"(?:View\s*job|Apply(?:\s*URL)?|Link|URL|Application|Contact)\s*[:\-]\s*(https?://[^\s<>\"']+)", re.IGNORECASE),
         re.compile(r"(https?://[^\s<>\"']+)", re.IGNORECASE),
     ]
 
@@ -318,13 +344,13 @@ class JobParser:
         r"([$€£₹]|USD\s*)?\s*(\d{1,3}(?:,\d{3})+|\d{2,3}\s*[kK]|\d{5,6})\s*(?:(?:per|/|a)\s*(?:year|yr|annum)|annual|annually)",
         re.IGNORECASE
     )
-    # 6. Indian LPA: 25 - 35 LPA, 30 LPA
+    # 6. Indian LPA: 25 - 35 LPA, 80L - 90L/year, 30 LPA
     P_LPA_RANGE = re.compile(
-        r"(\d{1,2}(?:\.\d{1,2})?)\s*(?:-|to|–|—)\s*(\d{1,2}(?:\.\d{1,2})?)\s*(?:LPA|Lakhs?(?:\s*per\s*annum)?)",
+        r"(?:[$€£₹]|USD\s*)?\s*(\d{1,3}(?:\.\d{1,2})?)\s*(?:[lL](?:akhs?|PA)?|LPA)\s*(?:-|to|–|—)\s*(?:[$€£₹]|USD\s*)?\s*(\d{1,3}(?:\.\d{1,2})?)\s*(?:[lL](?:akhs?|PA)?|LPA)(?:\s*(?:per|/|a)\s*(?:year|yr|annum))?",
         re.IGNORECASE
     )
     P_LPA_SINGLE = re.compile(
-        r"(\d{1,2}(?:\.\d{1,2})?)\s*(?:LPA|Lakhs?(?:\s*per\s*annum)?)",
+        r"(?:[$€£₹]|USD\s*)?\s*(\d{1,3}(?:\.\d{1,2})?)\s*(?:[lL]akhs?|LPA|[lL]\s*(?:per|/|a)\s*(?:year|yr|annum))",
         re.IGNORECASE
     )
 
@@ -333,7 +359,6 @@ class JobParser:
         Parses a RawEmail into one or more JobAlert objects.
         Handles both single-job emails and multi-job digests.
         """
-        # Split body into job blocks if it's a digest (e.g. repeated "Job Title:" or bullet markers)
         blocks = self._split_into_job_blocks(email.body)
         
         results: List[JobAlert] = []
@@ -345,23 +370,127 @@ class JobParser:
         return results
 
     def _split_into_job_blocks(self, body: str) -> List[str]:
-        """Detects if body contains multiple job listings or a single listing."""
-        # Check for repeated "Job Title:" or "Role:" or "Position:"
-        marker = re.findall(r"^(?:Job Title|Role|Position)\s*:", body, re.IGNORECASE | re.MULTILINE)
-        if len(marker) > 1:
-            # Multi-job digest: split on the marker
-            parts = re.split(r"(?=^(?:Job Title|Role|Position)\s*:)", body, flags=re.IGNORECASE | re.MULTILINE)
+        """
+        Detects if body contains multiple job listings or a single listing.
+        Handles labeled markers, divider lines (LinkedIn/digest style), and multiple job links.
+        """
+        normalized_body = body.replace("\xa0", " ").replace("\u200b", "").replace("\r\n", "\n")
+
+        # 1. Explicit labeled markers: repeated "Job Title:" or "Role:" or "Position:"
+        labeled_markers = re.findall(r"^(?:Job Title|Role|Position)\s*:", normalized_body, re.IGNORECASE | re.MULTILINE)
+        if len(labeled_markers) > 1:
+            parts = re.split(r"(?=^(?:Job Title|Role|Position)\s*:)", normalized_body, flags=re.IGNORECASE | re.MULTILINE)
             return [p.strip() for p in parts if p.strip()]
-        return [body]
+
+        # 2. Divider-separated job cards (e.g. LinkedIn digests separated by dashed lines)
+        divider_pattern = re.compile(r"\n[ \t]*[-=_]{5,}[ \t]*\n")
+        if divider_pattern.search(normalized_body):
+            raw_chunks = [c.strip() for c in divider_pattern.split(normalized_body) if c.strip()]
+            valid_blocks: List[str] = []
+            for chunk in raw_chunks:
+                clean_chunk = self._clean_digest_header(chunk)
+                if self._is_valid_job_block(clean_chunk):
+                    valid_blocks.append(clean_chunk)
+            if valid_blocks:
+                return valid_blocks
+
+        # 3. Repeated "View job:" URLs (LinkedIn digest fallback without dividers)
+        view_job_matches = list(re.finditer(r"View job:\s*https?://\S+", normalized_body, re.IGNORECASE))
+        if len(view_job_matches) > 1:
+            blocks: List[str] = []
+            prev_idx = 0
+            for m in view_job_matches:
+                end_idx = m.end()
+                chunk = normalized_body[prev_idx:end_idx].strip()
+                clean_chunk = self._clean_digest_header(chunk)
+                if self._is_valid_job_block(clean_chunk):
+                    blocks.append(clean_chunk)
+                prev_idx = end_idx
+            if blocks:
+                return blocks
+
+        return [normalized_body]
+
+    @staticmethod
+    def _clean_digest_header(chunk: str) -> str:
+        """Strips leading digest headers and greetings from the top of a card."""
+        lines = chunk.splitlines()
+        start_idx = 0
+        for i, line in enumerate(lines):
+            line_str = line.strip()
+            if not line_str:
+                continue
+            if re.match(
+                r"^(?:Your job alert for|Manage your job alerts|Here are (?:new )?jobs?|New jobs? matching|Jobs you may be|Jobs in|Daily job alert|Weekly job alert|Hi\s+[A-Za-z]+,)",
+                line_str,
+                re.IGNORECASE
+            ):
+                start_idx = i + 1
+            else:
+                break
+        return "\n".join(lines[start_idx:]).strip()
+
+    @staticmethod
+    def _is_valid_job_block(chunk: str) -> bool:
+        """Determines if a block is a job listing rather than an email footer / disclaimer."""
+        if not chunk or len(chunk) < 20:
+            return False
+
+        first_line = chunk.strip().splitlines()[0].strip()
+        footer_patterns = [
+            r"^See all jobs\b",
+            r"^Stand out and let hirers know\b",
+            r"^See messages instantly\b",
+            r"^This email was intended for\b",
+            r"^You are receiving Job Alert emails\b",
+            r"^Manage your job alerts\b",
+            r"^Unsubscribe\b",
+            r"^Privacy Policy\b",
+            r"^©\s*\d{4}\b"
+        ]
+        for fp in footer_patterns:
+            if re.search(fp, first_line, re.IGNORECASE):
+                return False
+
+        has_url = bool(re.search(r"https?://", chunk))
+        has_role_kw = bool(re.search(
+            r"\b(?:engineer|developer|architect|designer|lead|manager|specialist|sde|analyst|consultant|programmer)\b",
+            chunk,
+            re.IGNORECASE
+        ))
+        has_explicit = bool(re.search(r"(?:Job Title|Role|Position|View job|Apply)\s*:", chunk, re.IGNORECASE))
+
+        return bool(has_url or has_explicit or has_role_kw)
 
     def _parse_single_block(self, block: str, email: RawEmail) -> Optional[JobAlert]:
+        block_clean = block.replace("\xa0", " ").replace("\u200b", "").strip()
+        lines = [l.strip() for l in block_clean.splitlines() if l.strip()]
+        if not lines:
+            return None
+
         # 1. Title Extraction
         title = None
         for pattern in self.TITLE_PATTERNS:
-            match = pattern.search(block)
+            match = pattern.search(block_clean)
             if match:
-                title = match.group(1).strip()
+                title = (match.group(1) if match.groups() else match.group(0)).strip()
                 break
+
+        # Check for card positional title (e.g. LinkedIn digest where first line is Job Title)
+        if not title and lines:
+            first_line = lines[0]
+            norm_first_line = re.sub(r"[_\-–—]+", " ", first_line)
+            is_title_candidate = (
+                not first_line.startswith(("http", "www", "View job", "Apply", "Location:", "Salary:", "Posted by", "Hiring for", "Hi "))
+                and len(first_line) < 140
+                and bool(re.search(
+                    r"\b(?:engineer|developer|architect|designer|lead|manager|specialist|sde|analyst|consultant|programmer|frontend|front-end|ui|fullstack|full-stack|software|member of technical staff|mts|react|vue|angular|typescript|javascript)\b",
+                    norm_first_line,
+                    re.IGNORECASE
+                ))
+            )
+            if is_title_candidate:
+                title = first_line
 
         if not title:
             # Fallback: inspect subject line
@@ -375,30 +504,66 @@ class JobParser:
         # 2. Company Extraction
         company = None
         for pattern in self.COMPANY_PATTERNS:
-            match = pattern.search(block)
+            match = pattern.search(block_clean)
             if match:
-                company = match.group(1).strip()
+                company = (match.group(1) if match.groups() else match.group(0)).strip()
                 break
 
+        # Check for card positional company (in LinkedIn cards, line 1 is company when line 0 is title)
+        if not company and len(lines) >= 2 and title == lines[0]:
+            candidate_company = lines[1]
+            is_valid_comp = (
+                not candidate_company.startswith(("http", "www", "View job", "Apply", "Location:", "Salary:"))
+                and not re.search(r"\b(?:connections?|alumni|actively hiring|easy apply|applicants?)\b", candidate_company, re.IGNORECASE)
+                and len(candidate_company) < 80
+            )
+            if is_valid_comp:
+                company = candidate_company
+
         if not company:
-            # Try to find company from subject like "at Stripe" or "@ Vercel"
+            # 1. Try to find company from subject like "at Stripe" or "@ Vercel"
             comp_match = re.search(r"(?:at|@)\s+([A-Za-z0-9\s&]{2,25})", email.subject, re.IGNORECASE)
-            company = comp_match.group(1).strip() if comp_match else "Company Unknown"
+            # 2. Try "<Company> is hiring" e.g. "Resonance Recruitment is hiring"
+            is_hiring_match = re.search(r"^([A-Z][A-Za-z0-9&.\s]{1,30}?)\s+is hiring\b", email.subject, re.IGNORECASE)
+            if comp_match:
+                company = comp_match.group(1).strip()
+            elif is_hiring_match:
+                company = is_hiring_match.group(1).strip()
+            else:
+                # 3. Try subject prefix e.g. "Zelis Senior Front End Engineer" -> "Zelis"
+                lead_comp = re.match(
+                    r"^([A-Z][A-Za-z0-9&.\s]{1,25}?)\s+(?:Senior|Staff|Lead|Principal|Junior|Software|Frontend|Front-End|React|Web|UI|AVP)",
+                    email.subject
+                )
+                if lead_comp and not any(lead_comp.group(1).lower().startswith(x) for x in ["linkedin", "indeed", "naukri", "wellfound", "alert", "fwd", "re"]):
+                    company = lead_comp.group(1).strip()
+                else:
+                    company = "Company Unknown"
 
         # 3. URL / Application link
         url_match = None
         for pattern in self.URL_PATTERNS:
-            m = pattern.search(block)
+            m = pattern.search(block_clean)
             if m:
                 url_match = m.group(1).strip()
                 break
 
+        # Prefer job view URLs over generic alerts/help/unsubscribe links
+        if not url_match or any(bad in url_match for bad in ["jobs/alerts", "unsubscribe", "security", "linkedinmobileapp", "help"]):
+            all_urls = re.findall(r"https?://[^\s<>\"']+", block_clean)
+            job_urls = [u for u in all_urls if any(k in u for k in ["/jobs/view/", "/jobs/", "/careers/", "/apply"])]
+            if job_urls:
+                url_match = job_urls[0]
+
         # 4. Salary Extraction & Normalization
-        raw_salary, min_sal, max_sal, sort_key, currency = self._extract_salary(block)
+        raw_salary, min_sal, max_sal, sort_key, currency = self._extract_salary(block_clean)
+
+        clean_title = html.unescape(title).strip() if title else "Untitled Job Opening"
+        clean_company = html.unescape(company).strip() if company else "Company Unknown"
 
         return JobAlert(
-            title=title,
-            company=company,
+            title=clean_title,
+            company=clean_company,
             raw_salary=raw_salary,
             min_annual_salary=min_sal,
             max_annual_salary=max_sal,
@@ -499,7 +664,7 @@ class JobFilter:
         "react", "reactjs", "react.js",
         "vue", "vuejs", "vue.js",
         "angular", "svelte", "next.js", "nextjs", "nuxt",
-        "ui engineer", "ui developer", "ui/ux engineer", "web developer",
+        "ui engineer", "ui developer", "ui architect", "ui/ux engineer", "web developer", "web engineer",
         "javascript developer", "typescript developer", "client-side"
     ]
 
@@ -525,7 +690,12 @@ class JobFilter:
         Determines whether a job alert matches frontend criteria.
         Returns: (is_matched: bool, reason: str)
         """
-        search_corpus = f"{job.title} {job.source_email_subject}".lower()
+        # Match primarily against normalized job.title to avoid subject bleeding in multi-job digests
+        norm_title = re.sub(r"[_\-–—/]+", " ", job.title.lower()) if job.title else ""
+        if job.title and job.title != "Untitled Job Opening":
+            search_corpus = norm_title
+        else:
+            search_corpus = f"{norm_title} {job.source_email_subject.lower()}"
 
         # 1. Salary threshold filter
         if self.min_salary_threshold is not None:

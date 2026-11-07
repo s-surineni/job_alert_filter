@@ -152,5 +152,112 @@ class TestJobReporter(unittest.TestCase):
         self.assertEqual(ranked[2].title, "Role C")  # Unlisted (0.0)
 
 
+class TestLinkedInDigest(unittest.TestCase):
+    def setUp(self):
+        self.parser = JobParser()
+        self.filter = JobFilter()
+
+    def test_linkedin_digest_parsing_and_filtering(self):
+        body = """Your job alert for senior frontend in IndiaManage your job alerts: https://linkedin.com/alerts
+
+Software Engineer - Frontend (ReactJS, NextJs)
+H&M
+Bengaluru
+
+This company is actively hiring
+View job: https://www.linkedin.com/comm/jobs/view/1001/
+
+---------------------------------------------------------
+
+SDE-2, Partner Engineering
+Zinier
+Bengaluru
+
+7 company alumni
+View job: https://www.linkedin.com/comm/jobs/view/1002/
+
+---------------------------------------------------------
+
+Senior Software Engineer – Front-End (Angular)
+Deloitte
+Hyderabad
+
+5 connections
+View job: https://www.linkedin.com/comm/jobs/view/1003/
+
+---------------------------------------------------------
+
+See all jobs on LinkedIn: https://www.linkedin.com/comm/jobs/search
+Unsubscribe: https://www.linkedin.com/unsubscribe
+"""
+        email = RawEmail(
+            subject="Software Engineer - Frontend (ReactJS, NextJs) at H&M",
+            body=body
+        )
+        jobs = self.parser.parse_email(email)
+        self.assertEqual(len(jobs), 3)
+
+        # Job 1
+        self.assertIn("Frontend", jobs[0].title)
+        self.assertEqual(jobs[0].company, "H&M")
+        self.assertEqual(jobs[0].url_or_contact, "https://www.linkedin.com/comm/jobs/view/1001/")
+
+        # Job 2
+        self.assertEqual(jobs[1].title, "SDE-2, Partner Engineering")
+        self.assertEqual(jobs[1].company, "Zinier")
+        self.assertEqual(jobs[1].url_or_contact, "https://www.linkedin.com/comm/jobs/view/1002/")
+
+        # Job 3
+        self.assertIn("Front-End", jobs[2].title)
+        self.assertEqual(jobs[2].company, "Deloitte")
+        self.assertEqual(jobs[2].url_or_contact, "https://www.linkedin.com/comm/jobs/view/1003/")
+
+        # Filtering test: SDE-2 should NOT match frontend even if email subject mentions frontend
+        matched_jobs = [j for j in jobs if self.filter.is_match(j)[0]]
+        self.assertEqual(len(matched_jobs), 2)
+        titles = [j.title for j in matched_jobs]
+        self.assertTrue(any("H&M" in j.company for j in matched_jobs))
+        self.assertTrue(any("Deloitte" in j.company for j in matched_jobs))
+        self.assertFalse(any("Zinier" in j.company for j in matched_jobs))
+
+    def test_ui_architect_with_underscore_in_digest(self):
+        body = """
+UI_Architect
+WPP Enterprise Solutions
+Bengaluru
+
+11 company alumni
+View job: https://www.linkedin.com/comm/jobs/view/9999/
+"""
+        email = RawEmail(subject="Zelis Senior Front End Engineer", body=body)
+        jobs = self.parser.parse_email(email)
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0].title, "UI_Architect")
+        self.assertEqual(jobs[0].company, "WPP Enterprise Solutions")
+        matched, _ = self.filter.is_match(jobs[0])
+        self.assertTrue(matched)
+
+    def test_naukri_format_extraction(self):
+        body = """
+Hiring for an IT Services & Consulting company
+Posted by Resonance Recruitment.
+React Developer
+Australia, Canada, Germany
+₹80L - ₹90L/year
+Apply: https://dl.naukri.com/apply
+"""
+        email = RawEmail(subject="Resonance Recruitment is hiring", body=body)
+        jobs = self.parser.parse_email(email)
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0].title, "React Developer")
+        self.assertEqual(jobs[0].company, "Resonance Recruitment")
+        self.assertEqual(jobs[0].min_annual_salary, 8000000.0)
+        self.assertEqual(jobs[0].max_annual_salary, 9000000.0)
+        self.assertEqual(jobs[0].currency, "₹")
+        matched, _ = self.filter.is_match(jobs[0])
+        self.assertTrue(matched)
+
+
 if __name__ == "__main__":
     unittest.main()
+

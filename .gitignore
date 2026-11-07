@@ -38,6 +38,8 @@ venv.bak/
 # Gmail API & OAuth credentials (Phase 2)
 credentials.json
 token.json
+emails/
+downloaded_emails/
 *.pem
 *.key
 *.secret

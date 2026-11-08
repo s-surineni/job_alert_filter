@@ -3,6 +3,8 @@
 Unit tests for Job Alert Filter & Salary Ranker
 """
 
+import os
+import tempfile
 import unittest
 from job_alert_filter import (
     JobAlert,
@@ -10,7 +12,8 @@ from job_alert_filter import (
     JobParser,
     JobFilter,
     JobReporter,
-    LocalFileEmailSource
+    LocalFileEmailSource,
+    RankingConfig
 )
 
 
@@ -256,6 +259,121 @@ Apply: https://dl.naukri.com/apply
         self.assertEqual(jobs[0].currency, "₹")
         matched, _ = self.filter.is_match(jobs[0])
         self.assertTrue(matched)
+
+
+class TestRankingConfig(unittest.TestCase):
+    def test_csv_loading_and_matching(self):
+        sample_csv = """category,name,rank,salary,rating,number_of_ratings,position
+company,Stripe,1,,4.3,12500,
+company,Vercel,1,,4.5,850,
+position,Staff Front-End Architect,1,,,,
+position,Senior Frontend Engineer,1,,,,
+"""
+        with tempfile.NamedTemporaryFile("w", delete=False, suffix=".csv", encoding="utf-8") as tmp:
+            tmp.write(sample_csv)
+            tmp_path = tmp.name
+
+        try:
+            config = RankingConfig.load_from_file(tmp_path)
+            self.assertIn("Stripe", config.companies)
+            self.assertEqual(config.companies["Stripe"].rank, 1)
+            self.assertEqual(config.companies["Stripe"].rating, 4.3)
+            self.assertEqual(config.companies["Stripe"].number_of_ratings, 12500)
+            self.assertIn("Vercel", config.companies)
+            self.assertEqual(config.companies["Vercel"].rank, 1)
+            self.assertEqual(config.companies["Vercel"].rating, 4.5)
+            self.assertEqual(config.companies["Vercel"].number_of_ratings, 850)
+            self.assertIn("Staff Front-End Architect", config.positions)
+
+            job = JobAlert(
+                title="Staff Front-End Architect",
+                company="Stripe",
+                raw_salary="$250k",
+                min_annual_salary=250000.0,
+                max_annual_salary=250000.0,
+                sort_key_salary=250000.0,
+                url_or_contact="https://stripe.com",
+                source_email_subject="Stripe alert"
+            )
+            config.apply_to_job(job)
+            self.assertEqual(job.company_rank, 1)
+            self.assertEqual(job.position_rank, 1)
+            self.assertEqual(job.rating, 4.3)
+            self.assertEqual(job.number_of_ratings, 12500)
+            self.assertEqual(job.display_company_rank, "Tier 1")
+            self.assertEqual(job.display_position_rank, "#1")
+            self.assertEqual(job.display_rating, "★ 4.3 (12.5k)")
+
+            job_vercel = JobAlert(
+                title="Senior Frontend Engineer (React)",
+                company="Vercel Inc",
+                raw_salary="$180k",
+                min_annual_salary=180000.0,
+                max_annual_salary=180000.0,
+                sort_key_salary=180000.0,
+                url_or_contact="https://vercel.com",
+                source_email_subject="Vercel alert"
+            )
+            config.apply_to_job(job_vercel)
+            self.assertEqual(job_vercel.company_rank, 1)
+            self.assertEqual(job_vercel.position_rank, 1)
+            self.assertEqual(job_vercel.rating, 4.5)
+            self.assertEqual(job_vercel.number_of_ratings, 850)
+            self.assertEqual(job_vercel.display_rating, "★ 4.5 (850)")
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    def test_unranked_fallback(self):
+        from job_alert_filter import CompanyPreference, PositionPreference
+        config = RankingConfig(
+            companies={"Google": CompanyPreference(rank=1)},
+            positions={"Architect": PositionPreference(rank=1)}
+        )
+        job = JobAlert(
+            title="Junior Support Tech",
+            company="Unknown Inc",
+            raw_salary=None,
+            min_annual_salary=None,
+            max_annual_salary=None,
+            sort_key_salary=0.0,
+            url_or_contact=None,
+            source_email_subject="Alert"
+        )
+        config.apply_to_job(job)
+        self.assertEqual(job.company_rank, 99)
+        self.assertEqual(job.position_rank, 99)
+        self.assertEqual(job.display_company_rank, "-")
+        self.assertEqual(job.display_position_rank, "-")
+
+    def test_ranked_sorting_order(self):
+        tier1_top_role = JobAlert(
+            title="Architect", company="Tier 1 Corp", raw_salary=None,
+            min_annual_salary=150000.0, max_annual_salary=150000.0,
+            sort_key_salary=150000.0, url_or_contact=None, source_email_subject="",
+            company_rank=1, position_rank=1
+        )
+        tier2_high_pay = JobAlert(
+            title="Developer", company="Tier 2 Corp", raw_salary=None,
+            min_annual_salary=250000.0, max_annual_salary=250000.0,
+            sort_key_salary=250000.0, url_or_contact=None, source_email_subject="",
+            company_rank=2, position_rank=1
+        )
+        tier1_lower_pay = JobAlert(
+            title="Developer", company="Tier 1 Corp", raw_salary=None,
+            min_annual_salary=120000.0, max_annual_salary=120000.0,
+            sort_key_salary=120000.0, url_or_contact=None, source_email_subject="",
+            company_rank=1, position_rank=2
+        )
+        sorted_jobs = JobReporter.rank_and_sort([tier2_high_pay, tier1_lower_pay, tier1_top_role])
+        # Order should be:
+        # 1. tier1_top_role (Tier 1, Pos 1)
+        # 2. tier1_lower_pay (Tier 1, Pos 2)
+        # 3. tier2_high_pay (Tier 2, Pos 1)
+        self.assertEqual(sorted_jobs[0].title, "Architect")
+        self.assertEqual(sorted_jobs[1].title, "Developer")
+        self.assertEqual(sorted_jobs[1].company_rank, 1)
+        self.assertEqual(sorted_jobs[2].company, "Tier 2 Corp")
 
 
 if __name__ == "__main__":

@@ -26,7 +26,7 @@ import os
 import re
 import sys
 from abc import ABC, abstractmethod
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from email import policy
 from email.parser import BytesParser, Parser
 from pathlib import Path
@@ -49,6 +49,12 @@ class JobAlert:
     url_or_contact: Optional[str]
     source_email_subject: str
     currency: str = "$"
+    company_rank: int = 99
+    position_rank: int = 99
+    matched_position: Optional[str] = None
+    target_salary: Optional[str] = None
+    rating: Optional[float] = None
+    number_of_ratings: Optional[int] = None
 
     @property
     def display_salary(self) -> str:
@@ -69,6 +75,212 @@ class JobAlert:
         elif self.min_annual_salary:
             return f"{self.currency}{self.min_annual_salary:,.0f}/yr"
         return "Unlisted"
+
+    @property
+    def display_company_rank(self) -> str:
+        if self.company_rank < 99:
+            return f"Tier {self.company_rank}"
+        return "-"
+
+    @property
+    def display_position_rank(self) -> str:
+        if self.position_rank < 99:
+            return f"#{self.position_rank}"
+        return "-"
+
+    @property
+    def display_rating(self) -> str:
+        """User-friendly display for rating and review count."""
+        if self.rating is not None:
+            if self.number_of_ratings is not None and self.number_of_ratings > 0:
+                if self.number_of_ratings >= 1000:
+                    cnt_str = f"{self.number_of_ratings / 1000:.1f}k"
+                else:
+                    cnt_str = str(self.number_of_ratings)
+                return f"★ {self.rating:.1f} ({cnt_str})"
+            return f"★ {self.rating:.1f}"
+        return "-"
+
+
+@dataclass
+class CompanyPreference:
+    rank: int = 99
+    target_salary: Optional[str] = None
+    rating: Optional[float] = None
+    number_of_ratings: Optional[int] = None
+
+
+@dataclass
+class PositionPreference:
+    rank: int = 99
+    target_salary: Optional[str] = None
+
+
+@dataclass
+class RankingConfig:
+    """Stores company and position rankings loaded from CSV."""
+    companies: Dict[str, CompanyPreference] = field(default_factory=dict)
+    positions: Dict[str, PositionPreference] = field(default_factory=dict)
+    default_company_rank: int = 99
+    default_position_rank: int = 99
+
+    @classmethod
+    def load_from_file(cls, filepath: str | Path) -> "RankingConfig":
+        path = Path(filepath)
+        if not path.is_file():
+            raise FileNotFoundError(f"Rankings file not found: {filepath}")
+        return cls._load_from_csv(path)
+
+    @classmethod
+    def _load_from_csv(cls, path: Path) -> "RankingConfig":
+        companies: Dict[str, CompanyPreference] = {}
+        positions: Dict[str, PositionPreference] = {}
+
+        with open(path, "r", encoding="utf-8-sig") as f:
+            lines = [line.strip() for line in f if line.strip() and not line.strip().startswith("#")]
+
+        if not lines:
+            return cls(companies={}, positions={})
+
+        reader = csv.reader(lines)
+        header = [h.strip().lower() for h in next(reader, [])]
+
+        def find_col(aliases: List[str]) -> Optional[int]:
+            for alias in aliases:
+                for idx, h in enumerate(header):
+                    if alias in h:
+                        return idx
+            return None
+
+        cat_idx = find_col(["category", "type"])
+        name_idx = find_col(["name", "company", "position", "title"])
+        rank_idx = find_col(["rank"])
+        sal_idx = find_col(["salary", "comp", "pay"])
+        rating_idx = find_col(["rating", "stars", "score"])
+        num_ratings_idx = find_col(["number_of_ratings", "num_ratings", "reviews", "ratings", "count"])
+
+        if cat_idx is not None and name_idx is not None and rank_idx is not None:
+            for row in reader:
+                if len(row) <= max(cat_idx, name_idx, rank_idx):
+                    continue
+                cat = row[cat_idx].strip().lower()
+                name = row[name_idx].strip()
+                if not name:
+                    continue
+                try:
+                    rank = int(row[rank_idx].strip())
+                except ValueError:
+                    rank = 99
+
+                sal = row[sal_idx].strip() if sal_idx is not None and len(row) > sal_idx and row[sal_idx].strip() else None
+
+                rating = None
+                if rating_idx is not None and len(row) > rating_idx and row[rating_idx].strip():
+                    try:
+                        rating = float(row[rating_idx].strip())
+                    except ValueError:
+                        rating = None
+
+                num_rat = None
+                if num_ratings_idx is not None and len(row) > num_ratings_idx and row[num_ratings_idx].strip():
+                    try:
+                        clean_num = re.sub(r"[^\d]", "", row[num_ratings_idx].strip())
+                        if clean_num:
+                            num_rat = int(clean_num)
+                    except ValueError:
+                        num_rat = None
+
+                if "company" in cat:
+                    companies[name] = CompanyPreference(
+                        rank=rank,
+                        target_salary=sal,
+                        rating=rating,
+                        number_of_ratings=num_rat
+                    )
+                elif any(p in cat for p in ("pos", "role", "job", "title")):
+                    positions[name] = PositionPreference(
+                        rank=rank,
+                        target_salary=sal
+                    )
+        elif len(header) >= 2:
+            is_company = "company" in header[0]
+            for row in reader:
+                if len(row) >= 2 and row[0].strip():
+                    try:
+                        rk = int(row[1].strip())
+                    except ValueError:
+                        rk = 99
+                    if is_company:
+                        companies[row[0].strip()] = CompanyPreference(rank=rk)
+                    else:
+                        positions[row[0].strip()] = PositionPreference(rank=rk)
+
+        return cls(companies=companies, positions=positions)
+
+    def apply_to_job(self, job: JobAlert) -> None:
+        """Matches company and position against rankings and updates job ranks in-place."""
+        # 1. Company ranking match
+        comp_str = job.company.lower().strip()
+        comp_words = set(re.findall(r"\b\w+\b", comp_str))
+        matched_comp_pref: Optional[CompanyPreference] = None
+        best_comp_rank = self.default_company_rank
+
+        for comp_name, pref in self.companies.items():
+            c_key = comp_name.lower().strip()
+            c_words = set(re.findall(r"\b\w+\b", c_key))
+            matched = False
+            # Exact match
+            if c_key == comp_str:
+                matched = True
+            # Multi-word substring
+            elif len(c_key) > 3 and (c_key in comp_str or comp_str in c_key):
+                matched = True
+            # Word intersection match
+            elif c_words and c_words.issubset(comp_words):
+                matched = True
+            elif comp_words and comp_words.issubset(c_words):
+                matched = True
+
+            if matched:
+                if pref.rank < best_comp_rank:
+                    best_comp_rank = pref.rank
+                    matched_comp_pref = pref
+
+        job.company_rank = best_comp_rank
+        if matched_comp_pref:
+            job.rating = matched_comp_pref.rating
+            job.number_of_ratings = matched_comp_pref.number_of_ratings
+            if matched_comp_pref.target_salary:
+                job.target_salary = matched_comp_pref.target_salary
+
+        # 2. Position ranking match
+        title_str = job.title.lower().strip()
+        best_pos_rank = self.default_position_rank
+        best_pos_name = None
+        best_pos_pref: Optional[PositionPreference] = None
+
+        for pos_name, pref in self.positions.items():
+            p_key = pos_name.lower().strip()
+            # Direct phrase match
+            matched = False
+            if p_key in title_str:
+                matched = True
+            else:
+                # Check significant words (>2 chars)
+                sig_words = [w for w in re.findall(r"\b\w+\b", p_key) if len(w) > 2]
+                if sig_words and all(w in title_str for w in sig_words):
+                    matched = True
+
+            if matched:
+                if pref.rank < best_pos_rank:
+                    best_pos_rank = pref.rank
+                    best_pos_name = pos_name
+                    best_pos_pref = pref
+
+        job.position_rank = best_pos_rank
+        job.matched_position = best_pos_name
+        if best_pos_pref and best_pos_pref.target_salary and not job.target_salary:
+            job.target_salary = best_pos_pref.target_salary
 
 
 @dataclass
@@ -679,10 +891,25 @@ class JobFilter:
         self,
         include_keywords: Optional[List[str]] = None,
         exclude_keywords: Optional[List[str]] = None,
-        min_salary_threshold: Optional[float] = None
+        min_salary_threshold: Optional[float] = None,
+        target_positions: Optional[List[str]] = None
     ):
-        self.include_keywords = [k.lower() for k in (include_keywords or self.DEFAULT_INCLUDE_KEYWORDS)]
-        self.exclude_keywords = [k.lower() for k in (exclude_keywords or self.DEFAULT_EXCLUDE_KEYWORDS)]
+        base_includes = list(include_keywords or self.DEFAULT_INCLUDE_KEYWORDS)
+        base_excludes = list(exclude_keywords or self.DEFAULT_EXCLUDE_KEYWORDS)
+
+        if target_positions:
+            for pos in target_positions:
+                pos_lower = pos.lower().strip()
+                if pos_lower not in base_includes:
+                    base_includes.append(pos_lower)
+                # If target position mentions an excluded term (e.g. "backend", "data"),
+                # remove that term from excludes so user can search for multiple positions
+                for excl in list(base_excludes):
+                    if excl in pos_lower:
+                        base_excludes.remove(excl)
+
+        self.include_keywords = [k.lower() for k in base_includes]
+        self.exclude_keywords = [k.lower() for k in base_excludes]
         self.min_salary_threshold = min_salary_threshold
 
     def is_match(self, job: JobAlert) -> Tuple[bool, str]:
@@ -728,8 +955,24 @@ class JobReporter:
 
     @staticmethod
     def rank_and_sort(jobs: List[JobAlert]) -> List[JobAlert]:
-        """Sorts jobs by highest compensation first; unlisted at the end."""
-        return sorted(jobs, key=lambda j: j.sort_key_salary, reverse=True)
+        """
+        Sorts jobs by:
+        1. Company Rank (ascending: 1 is top tier, 99 is unranked)
+        2. Position Rank (ascending: 1 is top choice, 99 is unranked)
+        3. Compensation (descending: highest compensation first; unlisted at the end)
+        4. Company Rating (descending: highest rating first)
+        5. Number of Ratings (descending: most reviews first)
+        """
+        return sorted(
+            jobs,
+            key=lambda j: (
+                j.company_rank,
+                j.position_rank,
+                -j.sort_key_salary,
+                -(j.rating or 0.0),
+                -(j.number_of_ratings or 0)
+            )
+        )
 
     @classmethod
     def render(cls, jobs: List[JobAlert], output_format: str = "table") -> str:
@@ -752,60 +995,170 @@ class JobReporter:
         if not jobs:
             return "No matching jobs found."
 
+        has_rankings = any(j.company_rank < 99 or j.position_rank < 99 for j in jobs)
+        has_ratings = any(j.rating is not None for j in jobs)
+
         # Compute column widths
         col_rank = 4
-        col_title = max(18, min(36, max(len(j.title) for j in jobs)))
-        col_company = max(12, min(24, max(len(j.company) for j in jobs)))
-        col_salary = max(16, min(30, max(len(j.normalized_annual_summary) for j in jobs)))
-        col_link = 30
+        col_title = max(18, min(30, max(len(j.title) for j in jobs)))
+        col_company = max(12, min(20, max(len(j.company) for j in jobs)))
+        col_co_rank = 9
+        col_pos_rank = 9
+        col_rating = 15
+        col_salary = max(16, min(24, max(len(j.normalized_annual_summary) for j in jobs)))
+        col_link = 26
 
         lines: List[str] = []
-        border_top = f"┌{'─' * (col_rank + 2)}┬{'─' * (col_title + 2)}┬{'─' * (col_company + 2)}┬{'─' * (col_salary + 2)}┬{'─' * (col_link + 2)}┐"
-        border_mid = f"├{'─' * (col_rank + 2)}┼{'─' * (col_title + 2)}┼{'─' * (col_company + 2)}┼{'─' * (col_salary + 2)}┼{'─' * (col_link + 2)}┤"
-        border_bot = f"└{'─' * (col_rank + 2)}┴{'─' * (col_title + 2)}┴{'─' * (col_company + 2)}┴{'─' * (col_salary + 2)}┴{'─' * (col_link + 2)}┘"
+        if has_rankings and has_ratings:
+            border_top = f"┌{'─' * (col_rank + 2)}┬{'─' * (col_title + 2)}┬{'─' * (col_company + 2)}┬{'─' * (col_co_rank + 2)}┬{'─' * (col_pos_rank + 2)}┬{'─' * (col_rating + 2)}┬{'─' * (col_salary + 2)}┬{'─' * (col_link + 2)}┐"
+            border_mid = f"├{'─' * (col_rank + 2)}┼{'─' * (col_title + 2)}┼{'─' * (col_company + 2)}┼{'─' * (col_co_rank + 2)}┼{'─' * (col_pos_rank + 2)}┼{'─' * (col_rating + 2)}┼{'─' * (col_salary + 2)}┼{'─' * (col_link + 2)}┤"
+            border_bot = f"└{'─' * (col_rank + 2)}┴{'─' * (col_title + 2)}┴{'─' * (col_company + 2)}┴{'─' * (col_co_rank + 2)}┴{'─' * (col_pos_rank + 2)}┴{'─' * (col_rating + 2)}┴{'─' * (col_salary + 2)}┴{'─' * (col_link + 2)}┘"
 
-        lines.append(border_top)
-        header = (
-            f"│ {'#':<{col_rank}} "
-            f"│ {'Job Title':<{col_title}} "
-            f"│ {'Company':<{col_company}} "
-            f"│ {'Est. Annual CTC':<{col_salary}} "
-            f"│ {'Application URL':<{col_link}} │"
-        )
-        lines.append(header)
-        lines.append(border_mid)
-
-        for idx, job in enumerate(jobs, 1):
-            title = (job.title[:col_title - 3] + "...") if len(job.title) > col_title else job.title
-            company = (job.company[:col_company - 3] + "...") if len(job.company) > col_company else job.company
-            sal = job.normalized_annual_summary
-            sal_disp = (sal[:col_salary - 3] + "...") if len(sal) > col_salary else sal
-            raw_url = job.url_or_contact or "N/A"
-            url = (raw_url[:col_link - 3] + "...") if len(raw_url) > col_link else raw_url
-
-            row = (
-                f"│ {idx:<{col_rank}} "
-                f"│ {title:<{col_title}} "
-                f"│ {company:<{col_company}} "
-                f"│ {sal_disp:<{col_salary}} "
-                f"│ {url:<{col_link}} │"
+            lines.append(border_top)
+            header = (
+                f"│ {'#':<{col_rank}} "
+                f"│ {'Job Title':<{col_title}} "
+                f"│ {'Company':<{col_company}} "
+                f"│ {'Co. Rank':<{col_co_rank}} "
+                f"│ {'Pos. Rank':<{col_pos_rank}} "
+                f"│ {'Rating':<{col_rating}} "
+                f"│ {'Est. Annual CTC':<{col_salary}} "
+                f"│ {'Application URL':<{col_link}} │"
             )
-            lines.append(row)
+            lines.append(header)
+            lines.append(border_mid)
 
-        lines.append(border_bot)
+            for idx, job in enumerate(jobs, 1):
+                title = (job.title[:col_title - 3] + "...") if len(job.title) > col_title else job.title
+                company = (job.company[:col_company - 3] + "...") if len(job.company) > col_company else job.company
+                sal = job.normalized_annual_summary
+                sal_disp = (sal[:col_salary - 3] + "...") if len(sal) > col_salary else sal
+                raw_url = job.url_or_contact or "N/A"
+                url = (raw_url[:col_link - 3] + "...") if len(raw_url) > col_link else raw_url
+
+                row = (
+                    f"│ {idx:<{col_rank}} "
+                    f"│ {title:<{col_title}} "
+                    f"│ {company:<{col_company}} "
+                    f"│ {job.display_company_rank:<{col_co_rank}} "
+                    f"│ {job.display_position_rank:<{col_pos_rank}} "
+                    f"│ {job.display_rating:<{col_rating}} "
+                    f"│ {sal_disp:<{col_salary}} "
+                    f"│ {url:<{col_link}} │"
+                )
+                lines.append(row)
+
+            lines.append(border_bot)
+        elif has_rankings:
+            border_top = f"┌{'─' * (col_rank + 2)}┬{'─' * (col_title + 2)}┬{'─' * (col_company + 2)}┬{'─' * (col_co_rank + 2)}┬{'─' * (col_pos_rank + 2)}┬{'─' * (col_salary + 2)}┬{'─' * (col_link + 2)}┐"
+            border_mid = f"├{'─' * (col_rank + 2)}┼{'─' * (col_title + 2)}┼{'─' * (col_company + 2)}┼{'─' * (col_co_rank + 2)}┼{'─' * (col_pos_rank + 2)}┼{'─' * (col_salary + 2)}┼{'─' * (col_link + 2)}┤"
+            border_bot = f"└{'─' * (col_rank + 2)}┴{'─' * (col_title + 2)}┴{'─' * (col_company + 2)}┴{'─' * (col_co_rank + 2)}┴{'─' * (col_pos_rank + 2)}┴{'─' * (col_salary + 2)}┴{'─' * (col_link + 2)}┘"
+
+            lines.append(border_top)
+            header = (
+                f"│ {'#':<{col_rank}} "
+                f"│ {'Job Title':<{col_title}} "
+                f"│ {'Company':<{col_company}} "
+                f"│ {'Co. Rank':<{col_co_rank}} "
+                f"│ {'Pos. Rank':<{col_pos_rank}} "
+                f"│ {'Est. Annual CTC':<{col_salary}} "
+                f"│ {'Application URL':<{col_link}} │"
+            )
+            lines.append(header)
+            lines.append(border_mid)
+
+            for idx, job in enumerate(jobs, 1):
+                title = (job.title[:col_title - 3] + "...") if len(job.title) > col_title else job.title
+                company = (job.company[:col_company - 3] + "...") if len(job.company) > col_company else job.company
+                sal = job.normalized_annual_summary
+                sal_disp = (sal[:col_salary - 3] + "...") if len(sal) > col_salary else sal
+                raw_url = job.url_or_contact or "N/A"
+                url = (raw_url[:col_link - 3] + "...") if len(raw_url) > col_link else raw_url
+
+                row = (
+                    f"│ {idx:<{col_rank}} "
+                    f"│ {title:<{col_title}} "
+                    f"│ {company:<{col_company}} "
+                    f"│ {job.display_company_rank:<{col_co_rank}} "
+                    f"│ {job.display_position_rank:<{col_pos_rank}} "
+                    f"│ {sal_disp:<{col_salary}} "
+                    f"│ {url:<{col_link}} │"
+                )
+                lines.append(row)
+
+            lines.append(border_bot)
+        else:
+            border_top = f"┌{'─' * (col_rank + 2)}┬{'─' * (col_title + 2)}┬{'─' * (col_company + 2)}┬{'─' * (col_salary + 2)}┬{'─' * (col_link + 2)}┐"
+            border_mid = f"├{'─' * (col_rank + 2)}┼{'─' * (col_title + 2)}┼{'─' * (col_company + 2)}┼{'─' * (col_salary + 2)}┼{'─' * (col_link + 2)}┤"
+            border_bot = f"└{'─' * (col_rank + 2)}┴{'─' * (col_title + 2)}┴{'─' * (col_company + 2)}┴{'─' * (col_salary + 2)}┴{'─' * (col_link + 2)}┘"
+
+            lines.append(border_top)
+            header = (
+                f"│ {'#':<{col_rank}} "
+                f"│ {'Job Title':<{col_title}} "
+                f"│ {'Company':<{col_company}} "
+                f"│ {'Est. Annual CTC':<{col_salary}} "
+                f"│ {'Application URL':<{col_link}} │"
+            )
+            lines.append(header)
+            lines.append(border_mid)
+
+            for idx, job in enumerate(jobs, 1):
+                title = (job.title[:col_title - 3] + "...") if len(job.title) > col_title else job.title
+                company = (job.company[:col_company - 3] + "...") if len(job.company) > col_company else job.company
+                sal = job.normalized_annual_summary
+                sal_disp = (sal[:col_salary - 3] + "...") if len(sal) > col_salary else sal
+                raw_url = job.url_or_contact or "N/A"
+                url = (raw_url[:col_link - 3] + "...") if len(raw_url) > col_link else raw_url
+
+                row = (
+                    f"│ {idx:<{col_rank}} "
+                    f"│ {title:<{col_title}} "
+                    f"│ {company:<{col_company}} "
+                    f"│ {sal_disp:<{col_salary}} "
+                    f"│ {url:<{col_link}} │"
+                )
+                lines.append(row)
+
+            lines.append(border_bot)
+
         return "\n".join(lines)
 
     @staticmethod
     def _render_markdown(jobs: List[JobAlert]) -> str:
-        lines = [
-            "| Rank | Job Title | Company | Estimated Annual Salary | Raw Salary | Link |",
-            "| :--- | :--- | :--- | :--- | :--- | :--- |"
-        ]
-        for idx, j in enumerate(jobs, 1):
-            url_str = f"[Apply Here]({j.url_or_contact})" if j.url_or_contact else "N/A"
-            lines.append(
-                f"| {idx} | **{j.title}** | {j.company} | `{j.normalized_annual_summary}` | {j.display_salary} | {url_str} |"
-            )
+        has_rankings = any(j.company_rank < 99 or j.position_rank < 99 for j in jobs)
+        has_ratings = any(j.rating is not None for j in jobs)
+
+        if has_rankings and has_ratings:
+            lines = [
+                "| Rank | Job Title | Company | Co. Rank | Pos. Rank | Rating | Target Salary | Estimated Annual Salary | Raw Salary | Link |",
+                "| :--- | :--- | :--- | :---: | :---: | :---: | :--- | :--- | :--- | :--- |"
+            ]
+            for idx, j in enumerate(jobs, 1):
+                url_str = f"[Apply Here]({j.url_or_contact})" if j.url_or_contact else "N/A"
+                lines.append(
+                    f"| {idx} | **{j.title}** | {j.company} | `{j.display_company_rank}` | `{j.display_position_rank}` | {j.display_rating} | {j.target_salary or '-'} | `{j.normalized_annual_summary}` | {j.display_salary} | {url_str} |"
+                )
+        elif has_rankings:
+            lines = [
+                "| Rank | Job Title | Company | Co. Rank | Pos. Rank | Estimated Annual Salary | Raw Salary | Link |",
+                "| :--- | :--- | :--- | :---: | :---: | :--- | :--- | :--- |"
+            ]
+            for idx, j in enumerate(jobs, 1):
+                url_str = f"[Apply Here]({j.url_or_contact})" if j.url_or_contact else "N/A"
+                lines.append(
+                    f"| {idx} | **{j.title}** | {j.company} | `{j.display_company_rank}` | `{j.display_position_rank}` | `{j.normalized_annual_summary}` | {j.display_salary} | {url_str} |"
+                )
+        else:
+            lines = [
+                "| Rank | Job Title | Company | Estimated Annual Salary | Raw Salary | Link |",
+                "| :--- | :--- | :--- | :--- | :--- | :--- |"
+            ]
+            for idx, j in enumerate(jobs, 1):
+                url_str = f"[Apply Here]({j.url_or_contact})" if j.url_or_contact else "N/A"
+                lines.append(
+                    f"| {idx} | **{j.title}** | {j.company} | `{j.normalized_annual_summary}` | {j.display_salary} | {url_str} |"
+                )
         return "\n".join(lines)
 
     @staticmethod
@@ -813,13 +1166,28 @@ class JobReporter:
         import io
         output = io.StringIO()
         writer = csv.writer(output)
-        writer.writerow(["rank", "title", "company", "normalized_annual_salary", "min_annual", "max_annual", "sort_key", "raw_salary", "url", "subject"])
-        for idx, j in enumerate(jobs, 1):
-            writer.writerow([
-                idx, j.title, j.company, j.normalized_annual_summary,
-                j.min_annual_salary, j.max_annual_salary, j.sort_key_salary,
-                j.raw_salary, j.url_or_contact, j.source_email_subject
-            ])
+        has_rankings = any(j.company_rank < 99 or j.position_rank < 99 for j in jobs)
+        if has_rankings:
+            writer.writerow(["rank", "title", "company", "company_rank", "position_rank", "matched_position", "rating", "number_of_ratings", "target_salary", "normalized_annual_salary", "min_annual", "max_annual", "sort_key", "raw_salary", "url", "subject"])
+            for idx, j in enumerate(jobs, 1):
+                writer.writerow([
+                    idx, j.title, j.company,
+                    j.display_company_rank, j.display_position_rank, j.matched_position or "",
+                    j.rating if j.rating is not None else "",
+                    j.number_of_ratings if j.number_of_ratings is not None else "",
+                    j.target_salary or "",
+                    j.normalized_annual_summary,
+                    j.min_annual_salary, j.max_annual_salary, j.sort_key_salary,
+                    j.raw_salary, j.url_or_contact, j.source_email_subject
+                ])
+        else:
+            writer.writerow(["rank", "title", "company", "normalized_annual_salary", "min_annual", "max_annual", "sort_key", "raw_salary", "url", "subject"])
+            for idx, j in enumerate(jobs, 1):
+                writer.writerow([
+                    idx, j.title, j.company, j.normalized_annual_summary,
+                    j.min_annual_salary, j.max_annual_salary, j.sort_key_salary,
+                    j.raw_salary, j.url_or_contact, j.source_email_subject
+                ])
         return output.getvalue()
 
 
@@ -831,7 +1199,8 @@ def run_pipeline(
     input_source: EmailSource,
     job_filter: JobFilter,
     output_format: str = "table",
-    show_all: bool = False
+    show_all: bool = False,
+    ranking_config: Optional[RankingConfig] = None
 ) -> int:
     """Executes ingestion -> parsing -> filtering -> sorting -> reporting."""
     print("📥 Ingesting emails...", file=sys.stderr)
@@ -846,6 +1215,12 @@ def run_pipeline(
 
     print(f"   ✓ Extracted {len(all_jobs)} job opening(s)", file=sys.stderr)
 
+    # Apply company and position rankings if available
+    if ranking_config:
+        for job in all_jobs:
+            ranking_config.apply_to_job(job)
+        print(f"   ✓ Applied company ({len(ranking_config.companies)}) & position ({len(ranking_config.positions)}) rankings", file=sys.stderr)
+
     if show_all:
         matched_jobs = all_jobs
         print("   ℹ Filter bypassed (--all flag active)", file=sys.stderr)
@@ -858,7 +1233,7 @@ def run_pipeline(
                 matched_jobs.append(job)
             else:
                 discarded_count += 1
-        print(f"   ✓ Filtered to {len(matched_jobs)} frontend opening(s) ({discarded_count} discarded)", file=sys.stderr)
+        print(f"   ✓ Filtered to {len(matched_jobs)} matching opening(s) ({discarded_count} discarded)", file=sys.stderr)
 
     # Render results
     output = JobReporter.render(matched_jobs, output_format=output_format)
@@ -868,19 +1243,25 @@ def run_pipeline(
     if output_format == "table" and matched_jobs:
         sorted_jobs = JobReporter.rank_and_sort(matched_jobs)
         top_sal = sorted_jobs[0].normalized_annual_summary if sorted_jobs[0].sort_key_salary > 0 else "N/A"
-        print(f"\n📊 Summary: {len(matched_jobs)} frontend positions found. Highest: {top_sal} ({sorted_jobs[0].company})", file=sys.stderr)
+        rank_info = ""
+        if sorted_jobs[0].company_rank < 99:
+            rank_info = f" [Co. {sorted_jobs[0].display_company_rank}, Pos. {sorted_jobs[0].display_position_rank}]"
+        print(f"\n📊 Summary: {len(matched_jobs)} position(s) found. Top pick: {sorted_jobs[0].company} - {sorted_jobs[0].title} ({top_sal}){rank_info}", file=sys.stderr)
 
     return 0
 
 
 def build_cli() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Filter and rank email job alerts for frontend developer positions by salary.",
+        description="Filter and rank email job alerts for preferred companies and positions by rank and salary.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Run against sample alerts.txt (Phase 1 MVP):
+  # Run against sample alerts.txt with automatic ranking detection (rankings.csv):
   python3 job_alert_filter.py -i alerts.txt
+
+  # Explicitly specify a custom rankings CSV file:
+  python3 job_alert_filter.py -i alerts.txt --rankings rankings.csv
 
   # Output as Markdown table:
   python3 job_alert_filter.py -i alerts.txt --format markdown
@@ -888,17 +1269,27 @@ Examples:
   # Export rankings to CSV:
   python3 job_alert_filter.py -i alerts.txt --format csv > ranked_jobs.csv
 
+  # Disable rankings and sort purely by salary:
+  python3 job_alert_filter.py -i alerts.txt --no-rankings
+
   # Filter only jobs paying at least $160,000 / year:
   python3 job_alert_filter.py -i alerts.txt --min-salary 160000
-
-  # Read a folder of .eml files:
-  python3 job_alert_filter.py -i /path/to/eml_folder/
         """
     )
     parser.add_argument(
         "-i", "--input",
         default="alerts.txt",
         help="Path to alerts file (.txt, .eml, .json), directory of emails, or '-' for stdin (default: alerts.txt)"
+    )
+    parser.add_argument(
+        "-r", "--rankings",
+        default=None,
+        help="Path to company and position rankings CSV file. Defaults to rankings.csv if present."
+    )
+    parser.add_argument(
+        "--no-rankings",
+        action="store_true",
+        help="Disable company and position ranking; sort strictly by compensation."
     )
     parser.add_argument(
         "-f", "--format",
@@ -915,12 +1306,12 @@ Examples:
     parser.add_argument(
         "--all",
         action="store_true",
-        help="Show all parsed jobs without frontend filtering (useful for inspecting raw alert streams)"
+        help="Show all parsed jobs without filtering (useful for inspecting raw alert streams)"
     )
     parser.add_argument(
         "--include",
         nargs="+",
-        help="Additional custom keywords to match for frontend roles"
+        help="Additional custom keywords to match for target roles"
     )
     parser.add_argument(
         "--exclude",
@@ -940,6 +1331,16 @@ def main() -> int:
         print(f"[Error] Failed to initialize source '{args.input}': {e}", file=sys.stderr)
         return 1
 
+    ranking_config = None
+    if not args.no_rankings:
+        rankings_path = args.rankings or ("rankings.csv" if os.path.exists("rankings.csv") else None)
+        if rankings_path:
+            try:
+                ranking_config = RankingConfig.load_from_file(rankings_path)
+                print(f"🎯 Loaded rankings from CSV '{rankings_path}' ({len(ranking_config.companies)} companies, {len(ranking_config.positions)} positions)", file=sys.stderr)
+            except Exception as e:
+                print(f"[Warning] Could not load rankings from '{rankings_path}': {e}", file=sys.stderr)
+
     custom_include = None
     if args.include:
         custom_include = JobFilter.DEFAULT_INCLUDE_KEYWORDS + args.include
@@ -948,17 +1349,21 @@ def main() -> int:
     if args.exclude:
         custom_exclude = JobFilter.DEFAULT_EXCLUDE_KEYWORDS + args.exclude
 
+    target_positions = list(ranking_config.positions.keys()) if ranking_config else None
+
     job_filter = JobFilter(
         include_keywords=custom_include,
         exclude_keywords=custom_exclude,
-        min_salary_threshold=args.min_salary
+        min_salary_threshold=args.min_salary,
+        target_positions=target_positions
     )
 
     return run_pipeline(
         input_source=source,
         job_filter=job_filter,
         output_format=args.format,
-        show_all=args.all
+        show_all=args.all,
+        ranking_config=ranking_config
     )
 
 

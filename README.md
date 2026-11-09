@@ -164,11 +164,16 @@ position,Senior Frontend Engineer,2,$140k - $180k,,
 When ranking is active, jobs are sorted deterministically using the following priorities:
 1. **Company Rank (Ascending)**: Tier 1 dream companies appear before Tier 2, etc. (Unranked = Tier 99).
 2. **Position Rank (Ascending)**: Preferred role titles (#1) appear before secondary roles (#2).
-3. **Compensation (Descending)**: Within the same company tier and position rank, jobs are ordered by highest annual compensation.
+3. **Company Alumni (Descending)**: Prioritizes companies with higher number of company alumni (e.g. LinkedIn's "162 company alumni") for stronger referral and networking potential.
+4. **Compensation (Descending)**: Within the same company tier, position rank, and alumni level, jobs are ordered by highest annual compensation.
+5. **Company Rating & Review Volume (Descending)**: Highly rated companies with established Glassdoor feedback are favored when compensation is tied or unlisted.
 
 ```bash
 # Automatically loads rankings.csv if present in the workspace:
 python3 job_alert_filter.py -i emails/
+
+# Filter only companies with at least 10 company alumni:
+python3 job_alert_filter.py -i emails/ --min-alumni 10
 
 # Explicitly specify a custom rankings CSV file:
 python3 job_alert_filter.py -i emails/ --rankings my_rankings.csv
@@ -219,6 +224,9 @@ Structured output for downstream automation, webhooks, or cron pipelines.
 ## 🔍 Advanced Filtering Flags
 
 ```bash
+# Filter only companies with at least 15 company alumni:
+python3 job_alert_filter.py -i emails/ --min-alumni 15
+
 # Filter only jobs offering at least $175,000 / year (or equivalent):
 python3 job_alert_filter.py -i emails/ --min-salary 175000
 

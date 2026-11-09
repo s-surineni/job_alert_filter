@@ -375,6 +375,169 @@ position,Senior Frontend Engineer,1,,,,
         self.assertEqual(sorted_jobs[1].company_rank, 1)
         self.assertEqual(sorted_jobs[2].company, "Tier 2 Corp")
 
+    def test_company_alumni_priority_sorting(self):
+        job_162_alumni = JobAlert(
+            title="Full Stack Engineer III", company="CrowdStrike", raw_salary=None,
+            min_annual_salary=None, max_annual_salary=None,
+            sort_key_salary=0.0, url_or_contact="https://linkedin.com/1", source_email_subject="Alert",
+            company_alumni=162
+        )
+        job_60_alumni = JobAlert(
+            title="Senior Engineer", company="Sage", raw_salary=None,
+            min_annual_salary=None, max_annual_salary=None,
+            sort_key_salary=0.0, url_or_contact="https://linkedin.com/2", source_email_subject="Alert",
+            company_alumni=60
+        )
+        job_4_alumni = JobAlert(
+            title="Lead React Developer", company="Verisk", raw_salary=None,
+            min_annual_salary=None, max_annual_salary=None,
+            sort_key_salary=0.0, url_or_contact="https://linkedin.com/3", source_email_subject="Alert",
+            company_alumni=4
+        )
+        job_no_alumni = JobAlert(
+            title="Senior Frontend Engineer", company="GitLab", raw_salary=None,
+            min_annual_salary=None, max_annual_salary=None,
+            sort_key_salary=0.0, url_or_contact="https://linkedin.com/4", source_email_subject="Alert",
+            company_alumni=None
+        )
+
+        ranked = JobReporter.rank_and_sort([job_4_alumni, job_no_alumni, job_162_alumni, job_60_alumni])
+        self.assertEqual(ranked[0].company, "CrowdStrike")
+        self.assertEqual(ranked[0].company_alumni, 162)
+        self.assertEqual(ranked[1].company, "Sage")
+        self.assertEqual(ranked[1].company_alumni, 60)
+        self.assertEqual(ranked[2].company, "Verisk")
+        self.assertEqual(ranked[2].company_alumni, 4)
+        self.assertEqual(ranked[3].company, "GitLab")
+        self.assertIsNone(ranked[3].company_alumni)
+
+    def test_company_alumni_within_tiers(self):
+        tier1_low_alumni = JobAlert(
+            title="Frontend Engineer", company="Tier1 Co A", raw_salary=None,
+            min_annual_salary=None, max_annual_salary=None,
+            sort_key_salary=0.0, url_or_contact=None, source_email_subject="",
+            company_rank=1, company_alumni=5
+        )
+        tier1_high_alumni = JobAlert(
+            title="Frontend Engineer", company="Tier1 Co B", raw_salary=None,
+            min_annual_salary=None, max_annual_salary=None,
+            sort_key_salary=0.0, url_or_contact=None, source_email_subject="",
+            company_rank=1, company_alumni=50
+        )
+        tier2_huge_alumni = JobAlert(
+            title="Frontend Engineer", company="Tier2 Co C", raw_salary=None,
+            min_annual_salary=None, max_annual_salary=None,
+            sort_key_salary=0.0, url_or_contact=None, source_email_subject="",
+            company_rank=2, company_alumni=200
+        )
+
+        sorted_jobs = JobReporter.rank_and_sort([tier2_huge_alumni, tier1_low_alumni, tier1_high_alumni])
+        # Tier 1 comes first; within Tier 1, higher alumni (50 > 5) comes first; then Tier 2
+        self.assertEqual(sorted_jobs[0].company, "Tier1 Co B")
+        self.assertEqual(sorted_jobs[1].company, "Tier1 Co A")
+        self.assertEqual(sorted_jobs[2].company, "Tier2 Co C")
+
+    def test_alumni_rendering_table_markdown_csv(self):
+        jobs = [
+            JobAlert(
+                title="Staff Engineer", company="Acme Corp", raw_salary=None,
+                min_annual_salary=None, max_annual_salary=None,
+                sort_key_salary=0.0, url_or_contact="https://acme.com", source_email_subject="",
+                company_alumni=15
+            )
+        ]
+        table = JobReporter.render(jobs, output_format="table")
+        self.assertIn("Alumni", table)
+        self.assertIn("15 alumni", table)
+
+        markdown = JobReporter.render(jobs, output_format="markdown")
+        self.assertIn("| Alumni |", markdown)
+        self.assertIn("15 alumni", markdown)
+
+        csv_out = JobReporter.render(jobs, output_format="csv")
+        self.assertIn("company_alumni", csv_out)
+        self.assertIn(",15,", csv_out)
+
+
+class TestCompanyAlumniExtraction(unittest.TestCase):
+    def setUp(self):
+        self.parser = JobParser()
+
+    def test_alumni_extraction_formats(self):
+        body = """
+Lead React Developer
+Verisk
+Telangana, India
+
+4 company alumni
+View job: https://www.linkedin.com/comm/jobs/view/4450209035/
+---------------------------------------------------------
+Tech Lead
+WPP
+Gurgaon
+
+19 company alumni
+View job: https://www.linkedin.com/comm/jobs/view/4485820370/
+---------------------------------------------------------
+Senior Frontend Engineer
+GitLab
+Bengaluru
+
+1 school alum
+View job: https://www.linkedin.com/comm/jobs/view/4469392345/
+---------------------------------------------------------
+Frontend Developer
+Single Alum Corp
+Bengaluru
+
+1 company alum
+View job: https://www.linkedin.com/comm/jobs/view/4469399999/
+---------------------------------------------------------
+Mega Corp Lead
+MegaCorp
+Bengaluru
+
+1,250 company alumni
+View job: https://www.linkedin.com/comm/jobs/view/4469398888/
+"""
+        email = RawEmail(subject="LinkedIn Job Alert", body=body)
+        jobs = self.parser.parse_email(email)
+        self.assertEqual(len(jobs), 5)
+        self.assertEqual(jobs[0].company, "Verisk")
+        self.assertEqual(jobs[0].company_alumni, 4)
+
+        self.assertEqual(jobs[1].company, "WPP")
+        self.assertEqual(jobs[1].company_alumni, 19)
+
+        # School alumni should NOT be parsed as company alumni
+        self.assertEqual(jobs[2].company, "GitLab")
+        self.assertIsNone(jobs[2].company_alumni)
+
+        # Singular "1 company alum"
+        self.assertEqual(jobs[3].company, "Single Alum Corp")
+        self.assertEqual(jobs[3].company_alumni, 1)
+        self.assertEqual(jobs[3].display_company_alumni, "1 alum")
+
+        # Comma formatted "1,250 company alumni"
+        self.assertEqual(jobs[4].company, "MegaCorp")
+        self.assertEqual(jobs[4].company_alumni, 1250)
+        self.assertEqual(jobs[4].display_company_alumni, "1,250 alumni")
+
+    def test_min_alumni_filter(self):
+        filt = JobFilter(min_alumni_threshold=10)
+        job_low = JobAlert(
+            title="Frontend Dev", company="Co Low", raw_salary=None,
+            min_annual_salary=None, max_annual_salary=None, sort_key_salary=0.0,
+            url_or_contact=None, source_email_subject="", company_alumni=4
+        )
+        job_high = JobAlert(
+            title="Frontend Dev", company="Co High", raw_salary=None,
+            min_annual_salary=None, max_annual_salary=None, sort_key_salary=0.0,
+            url_or_contact=None, source_email_subject="", company_alumni=15
+        )
+        self.assertFalse(filt.is_match(job_low)[0])
+        self.assertTrue(filt.is_match(job_high)[0])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -7,13 +7,15 @@ import os
 import tempfile
 import unittest
 from job_alert_filter import (
+    CompanyPreference,
     JobAlert,
     RawEmail,
     JobParser,
     JobFilter,
     JobReporter,
     LocalFileEmailSource,
-    RankingConfig
+    RankingConfig,
+    build_cli
 )
 
 
@@ -263,11 +265,9 @@ Apply: https://dl.naukri.com/apply
 
 class TestRankingConfig(unittest.TestCase):
     def test_csv_loading_and_matching(self):
-        sample_csv = """category,name,rank,salary,rating,number_of_ratings,position
-company,Stripe,1,,4.3,12500,
-company,Vercel,1,,4.5,850,
-position,Staff Front-End Architect,1,,,,
-position,Senior Frontend Engineer,1,,,,
+        sample_csv = """company,position,rank,salary,rating,number_of_ratings
+Stripe,Staff Front-End Architect,1,,4.3,12500
+Vercel,Senior Frontend Engineer,1,,4.5,850
 """
         with tempfile.NamedTemporaryFile("w", delete=False, suffix=".csv", encoding="utf-8") as tmp:
             tmp.write(sample_csv)
@@ -279,11 +279,18 @@ position,Senior Frontend Engineer,1,,,,
             self.assertEqual(config.companies["Stripe"].rank, 1)
             self.assertEqual(config.companies["Stripe"].rating, 4.3)
             self.assertEqual(config.companies["Stripe"].number_of_ratings, 12500)
+            self.assertEqual(config.companies["Stripe"].position, "Staff Front-End Architect")
+
             self.assertIn("Vercel", config.companies)
             self.assertEqual(config.companies["Vercel"].rank, 1)
             self.assertEqual(config.companies["Vercel"].rating, 4.5)
             self.assertEqual(config.companies["Vercel"].number_of_ratings, 850)
-            self.assertIn("Staff Front-End Architect", config.positions)
+            self.assertEqual(config.companies["Vercel"].position, "Senior Frontend Engineer")
+
+            # Verify ordered preferences list
+            self.assertEqual(len(config.preferences), 2)
+            self.assertEqual(config.preferences[0].name, "Stripe")
+            self.assertEqual(config.preferences[1].name, "Vercel")
 
             job = JobAlert(
                 title="Staff Front-End Architect",
@@ -297,11 +304,9 @@ position,Senior Frontend Engineer,1,,,,
             )
             config.apply_to_job(job)
             self.assertEqual(job.company_rank, 1)
-            self.assertEqual(job.position_rank, 1)
             self.assertEqual(job.rating, 4.3)
             self.assertEqual(job.number_of_ratings, 12500)
             self.assertEqual(job.display_company_rank, "Tier 1")
-            self.assertEqual(job.display_position_rank, "#1")
             self.assertEqual(job.display_rating, "★ 4.3 (12.5k)")
 
             job_vercel = JobAlert(
@@ -316,10 +321,140 @@ position,Senior Frontend Engineer,1,,,,
             )
             config.apply_to_job(job_vercel)
             self.assertEqual(job_vercel.company_rank, 1)
-            self.assertEqual(job_vercel.position_rank, 1)
             self.assertEqual(job_vercel.rating, 4.5)
             self.assertEqual(job_vercel.number_of_ratings, 850)
             self.assertEqual(job_vercel.display_rating, "★ 4.5 (850)")
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    def test_strict_company_column_required(self):
+        sample_csv = """name,position,rank
+Google,Architect,1
+"""
+        with tempfile.NamedTemporaryFile("w", delete=False, suffix=".csv", encoding="utf-8") as tmp:
+            tmp.write(sample_csv)
+            tmp_path = tmp.name
+
+        try:
+            with self.assertRaises(ValueError) as ctx:
+                RankingConfig.load_from_file(tmp_path)
+            self.assertIn("must contain a 'company' column", str(ctx.exception))
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    def test_multiple_rows_per_company_parsing(self):
+        sample_csv = """company,position,rank,salary,rating,number_of_ratings
+Google,Staff Engineer,1,300000,4.4,120000
+Google,Frontend Engineer,1,200000,4.4,120000
+"""
+        with tempfile.NamedTemporaryFile("w", delete=False, suffix=".csv", encoding="utf-8") as tmp:
+            tmp.write(sample_csv)
+            tmp_path = tmp.name
+
+        try:
+            config = RankingConfig.load_from_file(tmp_path)
+            self.assertEqual(len(config.preferences), 2)
+            self.assertEqual(config.preferences[0].name, "Google")
+            self.assertEqual(config.preferences[0].position, "Staff Engineer")
+            self.assertEqual(config.preferences[0].target_salary, "300000")
+            self.assertEqual(config.preferences[1].name, "Google")
+            self.assertEqual(config.preferences[1].position, "Frontend Engineer")
+            self.assertEqual(config.preferences[1].target_salary, "200000")
+            # First match in dictionary
+            self.assertEqual(config.companies["Google"].position, "Staff Engineer")
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    def test_first_company_match_and_target_position(self):
+        sample_csv = """company,position,rank,salary,rating,number_of_ratings
+Meta,Staff UI Engineer,1,320000,4.1,45000
+Meta,Frontend Engineer,2,180000,4.1,45000
+"""
+        with tempfile.NamedTemporaryFile("w", delete=False, suffix=".csv", encoding="utf-8") as tmp:
+            tmp.write(sample_csv)
+            tmp_path = tmp.name
+
+        try:
+            config = RankingConfig.load_from_file(tmp_path)
+            job = JobAlert(
+                title="Staff UI Engineer",
+                company="Meta Platforms",
+                raw_salary=None,
+                min_annual_salary=None,
+                max_annual_salary=None,
+                sort_key_salary=0.0,
+                url_or_contact=None,
+                source_email_subject=""
+            )
+            config.apply_to_job(job)
+            # Should select first matching row (rank 1, Staff UI Engineer)
+            self.assertEqual(job.company_rank, 1)
+            self.assertEqual(job.target_position, "Staff UI Engineer")
+            self.assertEqual(job.target_salary, "320000")
+            self.assertEqual(job.position_rank, 99)
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    def test_target_salary_matching_behavior(self):
+        # 1. Matching title matches target position -> target salary applied
+        # 2. Non-matching title does NOT get position-specific target salary
+        # 3. Row with no position specifies general company target salary
+        sample_csv = """company,position,rank,salary,rating,number_of_ratings
+Apple,Lead iOS Developer,1,300000,4.2,65000
+Amazon,,2,220000,4.0,80000
+"""
+        with tempfile.NamedTemporaryFile("w", delete=False, suffix=".csv", encoding="utf-8") as tmp:
+            tmp.write(sample_csv)
+            tmp_path = tmp.name
+
+        try:
+            config = RankingConfig.load_from_file(tmp_path)
+
+            job_match = JobAlert(
+                title="Lead iOS Developer",
+                company="Apple Inc",
+                raw_salary=None,
+                min_annual_salary=None,
+                max_annual_salary=None,
+                sort_key_salary=0.0,
+                url_or_contact=None,
+                source_email_subject=""
+            )
+            config.apply_to_job(job_match)
+            self.assertEqual(job_match.target_position, "Lead iOS Developer")
+            self.assertEqual(job_match.target_salary, "300000")
+
+            job_mismatch = JobAlert(
+                title="Frontend Specialist",
+                company="Apple Inc",
+                raw_salary=None,
+                min_annual_salary=None,
+                max_annual_salary=None,
+                sort_key_salary=0.0,
+                url_or_contact=None,
+                source_email_subject=""
+            )
+            config.apply_to_job(job_mismatch)
+            self.assertEqual(job_mismatch.target_position, "Lead iOS Developer")
+            self.assertIsNone(job_mismatch.target_salary)
+
+            job_general = JobAlert(
+                title="Frontend Engineer",
+                company="Amazon",
+                raw_salary=None,
+                min_annual_salary=None,
+                max_annual_salary=None,
+                sort_key_salary=0.0,
+                url_or_contact=None,
+                source_email_subject=""
+            )
+            config.apply_to_job(job_general)
+            self.assertIsNone(job_general.target_position)
+            self.assertEqual(job_general.target_salary, "220000")
         finally:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
@@ -351,29 +486,76 @@ position,Senior Frontend Engineer,1,,,,
             title="Architect", company="Tier 1 Corp", raw_salary=None,
             min_annual_salary=150000.0, max_annual_salary=150000.0,
             sort_key_salary=150000.0, url_or_contact=None, source_email_subject="",
-            company_rank=1, position_rank=1
+            company_rank=1
         )
         tier2_high_pay = JobAlert(
             title="Developer", company="Tier 2 Corp", raw_salary=None,
             min_annual_salary=250000.0, max_annual_salary=250000.0,
             sort_key_salary=250000.0, url_or_contact=None, source_email_subject="",
-            company_rank=2, position_rank=1
+            company_rank=2
         )
         tier1_lower_pay = JobAlert(
             title="Developer", company="Tier 1 Corp", raw_salary=None,
             min_annual_salary=120000.0, max_annual_salary=120000.0,
             sort_key_salary=120000.0, url_or_contact=None, source_email_subject="",
-            company_rank=1, position_rank=2
+            company_rank=1
         )
         sorted_jobs = JobReporter.rank_and_sort([tier2_high_pay, tier1_lower_pay, tier1_top_role])
-        # Order should be:
-        # 1. tier1_top_role (Tier 1, Pos 1)
-        # 2. tier1_lower_pay (Tier 1, Pos 2)
-        # 3. tier2_high_pay (Tier 2, Pos 1)
-        self.assertEqual(sorted_jobs[0].title, "Architect")
-        self.assertEqual(sorted_jobs[1].title, "Developer")
-        self.assertEqual(sorted_jobs[1].company_rank, 1)
-        self.assertEqual(sorted_jobs[2].company, "Tier 2 Corp")
+        # Hierarchy: Salary (descending) -> Company Tier (ascending) -> Alumni (descending)
+        # 1. tier2_high_pay ($250,000)
+        # 2. tier1_top_role ($150,000)
+        # 3. tier1_lower_pay ($120,000)
+        self.assertEqual(sorted_jobs[0].company, "Tier 2 Corp")
+        self.assertEqual(sorted_jobs[0].sort_key_salary, 250000.0)
+        self.assertEqual(sorted_jobs[1].title, "Architect")
+        self.assertEqual(sorted_jobs[1].sort_key_salary, 150000.0)
+        self.assertEqual(sorted_jobs[2].title, "Developer")
+        self.assertEqual(sorted_jobs[2].sort_key_salary, 120000.0)
+
+    def test_salary_company_alumni_tiebreaking(self):
+        # Tied salary ($200k), different tiers
+        tier1_same_salary = JobAlert(
+            title="Lead Engineer", company="Co Alpha", raw_salary=None,
+            min_annual_salary=200000.0, max_annual_salary=200000.0,
+            sort_key_salary=200000.0, url_or_contact=None, source_email_subject="",
+            company_rank=1, company_alumni=10
+        )
+        tier2_same_salary = JobAlert(
+            title="Senior Engineer", company="Co Beta", raw_salary=None,
+            min_annual_salary=200000.0, max_annual_salary=200000.0,
+            sort_key_salary=200000.0, url_or_contact=None, source_email_subject="",
+            company_rank=2, company_alumni=500
+        )
+        # Tied salary ($200k) and tied tier (Tier 1), different alumni count
+        tier1_higher_alumni = JobAlert(
+            title="Staff Engineer", company="Co Gamma", raw_salary=None,
+            min_annual_salary=200000.0, max_annual_salary=200000.0,
+            sort_key_salary=200000.0, url_or_contact=None, source_email_subject="",
+            company_rank=1, company_alumni=100
+        )
+        # Lower salary ($180k) but huge alumni and Tier 1
+        tier1_lower_salary_huge_alumni = JobAlert(
+            title="Principal Engineer", company="Co Delta", raw_salary=None,
+            min_annual_salary=180000.0, max_annual_salary=180000.0,
+            sort_key_salary=180000.0, url_or_contact=None, source_email_subject="",
+            company_rank=1, company_alumni=1000
+        )
+
+        ranked = JobReporter.rank_and_sort([
+            tier1_lower_salary_huge_alumni,
+            tier2_same_salary,
+            tier1_same_salary,
+            tier1_higher_alumni
+        ])
+
+        # 1. $200k, Tier 1, 100 alumni (Co Gamma)
+        # 2. $200k, Tier 1, 10 alumni (Co Alpha)
+        # 3. $200k, Tier 2, 500 alumni (Co Beta)
+        # 4. $180k, Tier 1, 1000 alumni (Co Delta - lower salary sorts after $200k)
+        self.assertEqual(ranked[0].company, "Co Gamma")
+        self.assertEqual(ranked[1].company, "Co Alpha")
+        self.assertEqual(ranked[2].company, "Co Beta")
+        self.assertEqual(ranked[3].company, "Co Delta")
 
     def test_company_alumni_priority_sorting(self):
         job_162_alumni = JobAlert(
@@ -458,6 +640,49 @@ position,Senior Frontend Engineer,1,,,,
         self.assertIn("company_alumni", csv_out)
         self.assertIn(",15,", csv_out)
 
+    def test_target_pos_rendering_table_markdown_csv(self):
+        jobs = [
+            JobAlert(
+                title="Staff Engineer", company="Acme Corp", raw_salary=None,
+                min_annual_salary=None, max_annual_salary=None,
+                sort_key_salary=0.0, url_or_contact="https://acme.com", source_email_subject="",
+                company_rank=1, target_position="Principal Frontend"
+            )
+        ]
+        table = JobReporter.render(jobs, output_format="table")
+        self.assertIn("Target Pos", table)
+        self.assertIn("Principal Frontend", table)
+        self.assertNotIn("Pos. Rank", table)
+
+        markdown = JobReporter.render(jobs, output_format="markdown")
+        self.assertIn("| Target Pos |", markdown)
+        self.assertIn("Principal Frontend", markdown)
+        self.assertNotIn("Pos. Rank", markdown)
+
+        csv_out = JobReporter.render(jobs, output_format="csv")
+        self.assertIn("target_position", csv_out)
+        self.assertIn("Principal Frontend", csv_out)
+        self.assertNotIn("position_rank", csv_out)
+
+    def test_cli_json_format_removed(self):
+        parser = build_cli()
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["--format", "json"])
+        # table, markdown, csv should be valid
+        args = parser.parse_args(["--format", "csv"])
+        self.assertEqual(args.format, "csv")
+
+    def test_default_rankings_csv_file_validity(self):
+        rankings_file = os.path.join(os.path.dirname(__file__), "rankings.csv")
+        if os.path.exists(rankings_file):
+            config = RankingConfig.load_from_file(rankings_file)
+            self.assertGreaterEqual(len(config.companies), 10)
+            self.assertIn("Sage", config.companies)
+            self.assertEqual(config.companies["Sage"].position, "Senior Engineer")
+            self.assertIn("Cisco", config.companies)
+            self.assertEqual(config.companies["Cisco"].position, "Software Engineer IV")
+            self.assertIn("Google", config.companies)
+
 
 class TestCompanyAlumniExtraction(unittest.TestCase):
     def setUp(self):
@@ -537,6 +762,40 @@ View job: https://www.linkedin.com/comm/jobs/view/4469398888/
         )
         self.assertFalse(filt.is_match(job_low)[0])
         self.assertTrue(filt.is_match(job_high)[0])
+
+
+    def test_company_preference_and_target_position_fields(self):
+        pref = CompanyPreference(name="Google", position="Senior Frontend Engineer", rank=1)
+        self.assertEqual(pref.name, "Google")
+        self.assertEqual(pref.position, "Senior Frontend Engineer")
+        self.assertEqual(pref.rank, 1)
+
+        job = JobAlert(
+            title="Frontend Dev",
+            company="Google",
+            raw_salary=None,
+            min_annual_salary=None,
+            max_annual_salary=None,
+            sort_key_salary=0.0,
+            url_or_contact=None,
+            source_email_subject="Test",
+            target_position="Senior Frontend Engineer"
+        )
+        self.assertEqual(job.target_position, "Senior Frontend Engineer")
+        self.assertEqual(job.display_target_position, "Senior Frontend Engineer")
+
+        job_empty = JobAlert(
+            title="Frontend Dev",
+            company="Google",
+            raw_salary=None,
+            min_annual_salary=None,
+            max_annual_salary=None,
+            sort_key_salary=0.0,
+            url_or_contact=None,
+            source_email_subject="Test"
+        )
+        self.assertIsNone(job_empty.target_position)
+        self.assertEqual(job_empty.display_target_position, "-")
 
 
 if __name__ == "__main__":

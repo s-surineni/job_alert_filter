@@ -146,27 +146,23 @@ The parser automatically recognizes, parses, and normalizes compensation into an
 
 ## 🎯 Company & Position Preference Ranking (`rankings.csv`)
 
-In addition to salary, the tool lets you prioritize opportunities according to **company tiers**, **position titles**, **target pay**, and **company ratings/reviews**.
+In addition to salary, the tool lets you prioritize opportunities according to **target compensation**, **company tiers**, **position titles**, and **company ratings/reviews**.
 
 ### CSV Schema (`rankings.csv`):
 ```csv
-category,name,rank,salary,rating,number_of_ratings
-company,Stripe,1,$220k - $260k,4.3,12500
-company,Vercel,1,$150k - $190k,4.5,850
-company,HyperScale AI,2,$160k - $200k,4.0,120
-company,Creative Studio Inc,3,$120k - $150k,3.5,45
-position,Staff Front-End Architect,1,$210k - $260k,,
-position,Lead UI Engineer,1,$160k - $200k,,
-position,Senior Frontend Engineer,2,$140k - $180k,,
+company,position,rank,salary,rating,number_of_ratings
+Stripe,Staff Front-End Architect,1,$220k - $260k,4.3,12500
+Vercel,Senior Frontend Engineer,1,$150k - $190k,4.5,850
+HyperScale AI,Lead UI Engineer,2,$160k - $200k,4.0,120
+Creative Studio Inc,,3,$120k - $150k,3.5,45
 ```
 
 ### Ranking & Sorting Hierarchy
 When ranking is active, jobs are sorted deterministically using the following priorities:
-1. **Company Rank (Ascending)**: Tier 1 dream companies appear before Tier 2, etc. (Unranked = Tier 99).
-2. **Position Rank (Ascending)**: Preferred role titles (#1) appear before secondary roles (#2).
+1. **Compensation (Descending)**: Jobs offering higher verified compensation appear first.
+2. **Company Rank (Ascending)**: Tier 1 dream companies appear before Tier 2, etc. (Unranked = Tier 99).
 3. **Company Alumni (Descending)**: Prioritizes companies with higher number of company alumni (e.g. LinkedIn's "162 company alumni") for stronger referral and networking potential.
-4. **Compensation (Descending)**: Within the same company tier, position rank, and alumni level, jobs are ordered by highest annual compensation.
-5. **Company Rating & Review Volume (Descending)**: Highly rated companies with established Glassdoor feedback are favored when compensation is tied or unlisted.
+4. **Company Rating & Review Volume (Descending)**: Highly rated companies with established Glassdoor feedback are favored when compensation is tied or unlisted.
 
 ```bash
 # Automatically loads rankings.csv if present in the workspace:
@@ -191,14 +187,14 @@ python3 job_alert_filter.py -i emails/ --no-rankings
 python3 job_alert_filter.py -i alerts.txt
 ```
 ```
-┌──────┬───────────────────────────────┬─────────────────────┬──────────┬───────────┬───────────────┬────────────────────────┬────────────────────────────┐
-│ #    │ Job Title                     │ Company             │ Co. Rank │ Pos. Rank │ Rating        │ Est. Annual CTC        │ Application URL            │
-├──────┼───────────────────────────────┼─────────────────────┼──────────┼───────────┼───────────────┼────────────────────────┼────────────────────────────┤
-│ 1    │ Staff Front-End Architect     │ Stripe              │ Tier 1   │ #1        │ ★ 4.3 (12.5k) │ $210,000 - $260,000/yr │ https://stripe.com/jobs... │
-│ 2    │ Senior Frontend Engineer (R...│ Vercel              │ Tier 1   │ #1        │ ★ 4.5 (850)   │ $150,000 - $185,000/yr │ https://vercel.com/care... │
-│ 3    │ Lead UI Engineer              │ HyperScale AI       │ Tier 2   │ #1        │ ★ 4.0 (120)   │ Unlisted               │ https://wellfound.com/j... │
-│ 4    │ Frontend Web Developer (Vue...│ Creative Studio Inc │ Tier 3   │ #2        │ ★ 3.5 (45)    │ $150,000 - $190,000/yr │ https://creativestudio.... │
-└──────┴───────────────────────────────┴─────────────────────┴──────────┴───────────┴───────────────┴────────────────────────┴────────────────────────────┘
+┌──────┬───────────────────────────────┬─────────────────────┬──────────┬────────────────────────┬───────────────┬────────────────────────┬────────────────────────────┐
+│ #    │ Job Title                     │ Company             │ Co. Rank │ Target Pos             │ Rating        │ Est. Annual CTC        │ Application URL            │
+├──────┼───────────────────────────────┼─────────────────────┼──────────┼────────────────────────┼───────────────┼────────────────────────┼────────────────────────────┤
+│ 1    │ Staff Front-End Architect     │ Stripe              │ Tier 1   │ Staff Front-End Arc... │ ★ 4.3 (12.5k) │ $210,000 - $260,000/yr │ https://stripe.com/jobs... │
+│ 2    │ Senior Frontend Engineer (R...│ Vercel              │ Tier 1   │ Senior Frontend Eng... │ ★ 4.5 (850)   │ $150,000 - $185,000/yr │ https://vercel.com/care... │
+│ 3    │ Frontend Web Developer (Vue...│ Creative Studio Inc │ Tier 3   │ -                      │ ★ 3.5 (45)    │ $150,000 - $190,000/yr │ https://creativestudio.... │
+│ 4    │ Lead UI Engineer              │ HyperScale AI       │ Tier 2   │ Lead UI Engineer       │ ★ 4.0 (120)   │ Unlisted               │ https://wellfound.com/j... │
+└──────┴───────────────────────────────┴─────────────────────┴──────────┴────────────────────────┴───────────────┴────────────────────────┴────────────────────────────┘
 ```
 
 ### 2. Markdown Table
@@ -212,12 +208,6 @@ Ideal for pasting into Notion, GitHub issues, Obsidian, or project documentation
 python3 job_alert_filter.py -i emails/ -f csv > ranked_jobs.csv
 ```
 Enables direct import into Google Sheets, Airtable, or Excel for job application tracking.
-
-### 4. JSON Output
-```bash
-python3 job_alert_filter.py -i emails/ -f json
-```
-Structured output for downstream automation, webhooks, or cron pipelines.
 
 ---
 

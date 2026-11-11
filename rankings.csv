@@ -1,26 +1,14 @@
-category,name,rank,salary,rating,number_of_ratings,position
-company,Sage,,2620000,3.7,40,Senior Engineer
-company,Vercel,,,4.5,850,
-company,Google,,,4.4,120000,
-company,Meta,,,4.1,45000,
-company,Apple,,,4.2,65000,
-company,OpenAI,,,4.7,600,
-company,Anthropic,,,4.8,400,
-company,HyperScale AI,,,4,120,
-company,Netflix,,,4.3,3200,
-company,Airbnb,,,4.2,4800,
-company,Creative Studio Inc,,,3.5,45,
-position,Staff Front-End Architect,,,,,
-position,Principal Engineer,,,,,
-position,Lead UI Engineer,,,,,
-position,Senior Frontend Engineer,,,,,
-position,Senior Frontend Developer,,,,,
-position,Frontend Architect,,,,,
-position,Frontend Web Developer,,,,,
-position,Frontend Engineer,,,,,
-position,UI Engineer,,,,,
-position,React Developer,,,,,
-position,Full Stack Engineer,,,,,
-position,Software Engineer,,,,,
-company,Verisk,,2075255,3.5,94,
-company,Cisco,,5104697,3.6,2808,Software Engineer IV
+company,position,rank,salary,rating,number_of_ratings
+Sage,Senior Engineer,,2620000,3.7,40
+Vercel,,,,4.5,850
+Google,,,,4.4,120000
+Meta,,,,4.1,45000
+Apple,,,,4.2,65000
+OpenAI,,,,4.7,600
+Anthropic,,,,4.8,400
+HyperScale AI,,,,4,120
+Netflix,,,,4.3,3200
+Airbnb,,,,4.2,4800
+Creative Studio Inc,,,,3.5,45
+Verisk,,,2075255,3.5,94
+Cisco,Software Engineer IV,,5104697,3.6,2808

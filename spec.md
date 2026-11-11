@@ -45,6 +45,9 @@ This feature simplifies and restructures `rankings.csv`:
 - Target salary fallback:
   - If the alert's title matches the row's `position`, the row's `salary` is applied as the job's `target_salary`.
   - If no position was specified on the CSV row, the row's `salary` is applied as a general company target salary.
+  - **Compensation Fallback for Unlisted Alerts**: When a job alert does not have a salary listed in the email (`sort_key_salary <= 0`), the matched `target_salary` from `rankings.csv` is parsed and used as the compensation estimate for both:
+    1. **Display**: Formatted with a `(Target)` suffix (e.g. `₹2,620,000/yr (Target)`).
+    2. **Sorting**: Used as `sort_key_salary` so target compensation actively ranks the job in the compensation hierarchy. If an alert already contains an explicit salary in the email, the email's salary takes precedence.
 
 ---
 

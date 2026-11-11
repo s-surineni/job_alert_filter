@@ -57,12 +57,15 @@ class JobAlert:
     rating: Optional[float] = None
     number_of_ratings: Optional[int] = None
     company_alumni: Optional[int] = None
+    is_target_salary_applied: bool = False
 
     @property
     def display_salary(self) -> str:
         """User-friendly representation of salary."""
         if self.raw_salary and self.raw_salary.strip():
             return self.raw_salary.strip()
+        if self.target_salary and self.target_salary.strip():
+            return f"{self.target_salary.strip()} (Target)"
         return "Unlisted / Negotiable"
 
     @property
@@ -70,12 +73,13 @@ class JobAlert:
         """Formatted normalized annual salary estimate."""
         if self.sort_key_salary <= 0:
             return "Unlisted"
+        suffix = "/yr (Target)" if self.is_target_salary_applied else "/yr"
         if self.min_annual_salary and self.max_annual_salary and self.min_annual_salary != self.max_annual_salary:
-            return f"{self.currency}{self.min_annual_salary:,.0f} - {self.currency}{self.max_annual_salary:,.0f}/yr"
+            return f"{self.currency}{self.min_annual_salary:,.0f} - {self.currency}{self.max_annual_salary:,.0f}{suffix}"
         elif self.max_annual_salary:
-            return f"{self.currency}{self.max_annual_salary:,.0f}/yr"
+            return f"{self.currency}{self.max_annual_salary:,.0f}{suffix}"
         elif self.min_annual_salary:
-            return f"{self.currency}{self.min_annual_salary:,.0f}/yr"
+            return f"{self.currency}{self.min_annual_salary:,.0f}{suffix}"
         return "Unlisted"
 
     @property
@@ -134,6 +138,73 @@ class CompanyPreference:
 class PositionPreference:
     rank: int = 99
     target_salary: Optional[str] = None
+
+
+def parse_salary_value(text: str, default_curr: str = "$") -> Tuple[Optional[float], Optional[float], float, str]:
+    """Parses a salary string (e.g. from rankings.csv) into min, max, sort_key, and currency."""
+    if not text or not text.strip():
+        return None, None, 0.0, default_curr
+    text = text.strip()
+    curr = default_curr
+    if "₹" in text or "rs" in text.lower() or "inr" in text.lower() or "lpa" in text.lower():
+        curr = "₹"
+    elif "€" in text:
+        curr = "€"
+    elif "£" in text:
+        curr = "£"
+    elif "$" in text or "usd" in text.lower():
+        curr = "$"
+
+    # 1. LPA range: 25 - 35 LPA
+    m = re.search(r"(\d+(?:\.\d+)?)\s*(?:[lL](?:akhs?|PA)?|LPA)?\s*(?:-|to|–|—)\s*(\d+(?:\.\d+)?)\s*(?:[lL](?:akhs?|PA)?|LPA)", text, re.I)
+    if m:
+        min_v = float(m.group(1)) * 100000.0
+        max_v = float(m.group(2)) * 100000.0
+        return min_v, max_v, max_v, "₹"
+
+    # 2. LPA single: 30 LPA
+    m = re.search(r"(\d+(?:\.\d+)?)\s*(?:[lL]akhs?|LPA)", text, re.I)
+    if m:
+        v = float(m.group(1)) * 100000.0
+        return v, v, v, "₹"
+
+    # 3. Shorthand range: 150k - 190k
+    m = re.search(r"(\d+)\s*[kK]?\s*(?:-|to|–|—)\s*(\d+)\s*[kK]", text, re.I)
+    if m:
+        min_v = float(m.group(1)) * 1000.0
+        max_v = float(m.group(2)) * 1000.0
+        return min_v, max_v, max_v, curr
+
+    # 4. Shorthand single: 250k
+    m = re.search(r"(\d+)\s*[kK]", text, re.I)
+    if m:
+        v = float(m.group(1)) * 1000.0
+        return v, v, v, curr
+
+    # 5. Full numbers range: 150,000 - 180,000
+    m = re.search(r"(\d[\d,]*)\s*(?:-|to|–|—)\s*(\d[\d,]*)", text)
+    if m:
+        clean1 = m.group(1).replace(",", "")
+        clean2 = m.group(2).replace(",", "")
+        if clean1.isdigit() and clean2.isdigit():
+            min_v = float(clean1)
+            max_v = float(clean2)
+            if curr == "$" and min_v >= 500000:
+                curr = "₹"
+            return min_v, max_v, max_v, curr
+
+    # 6. Plain single number: 2620000 or 26,20,000 or 150000
+    clean = re.sub(r"[^\d.]", "", text)
+    if clean:
+        try:
+            v = float(clean)
+            if curr == "$" and v >= 500000:
+                curr = "₹"
+            return v, v, v, curr
+        except ValueError:
+            pass
+
+    return None, None, 0.0, curr
 
 
 @dataclass
@@ -310,6 +381,16 @@ class RankingConfig:
                     pos_words = [w for w in re.findall(r"\b\w+\b", pos_key) if len(w) > 2]
                     if pos_key in title_str or (pos_words and all(w in title_str for w in pos_words)):
                         job.target_salary = matched_pref.target_salary
+
+            # Fallback compensation from target_salary if alert has no listed salary
+            if job.target_salary and job.sort_key_salary <= 0:
+                min_s, max_s, sort_s, curr = parse_salary_value(job.target_salary, default_curr=job.currency)
+                if sort_s > 0:
+                    job.min_annual_salary = min_s
+                    job.max_annual_salary = max_s
+                    job.sort_key_salary = sort_s
+                    job.currency = curr
+                    job.is_target_salary_applied = True
         else:
             job.company_rank = self.default_company_rank
 
@@ -1067,7 +1148,7 @@ class JobReporter:
         col_target_pos = max(12, min(25, max(len(j.display_target_position) for j in jobs)))
         col_alumni = 12
         col_rating = 15
-        col_salary = max(16, min(24, max(len(j.normalized_annual_summary) for j in jobs)))
+        col_salary = max(16, min(30, max(len(j.normalized_annual_summary) for j in jobs)))
         col_link = 26
 
         cols: List[Tuple[str, int, Any]] = [

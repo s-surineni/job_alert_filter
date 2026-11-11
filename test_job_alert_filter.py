@@ -455,6 +455,74 @@ Amazon,,2,220000,4.0,80000
             config.apply_to_job(job_general)
             self.assertIsNone(job_general.target_position)
             self.assertEqual(job_general.target_salary, "220000")
+            self.assertEqual(job_general.sort_key_salary, 220000.0)
+            self.assertEqual(job_general.normalized_annual_summary, "$220,000/yr (Target)")
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    def test_target_salary_compensation_fallback_and_sorting(self):
+        sample_csv = """company,position,rank,salary,rating,number_of_ratings
+Sage,Senior Engineer,,2620000,3.7,40
+Cisco,Software Engineer IV,,5104697,3.6,2808
+"""
+        with tempfile.NamedTemporaryFile("w", delete=False, suffix=".csv", encoding="utf-8") as tmp:
+            tmp.write(sample_csv)
+            tmp_path = tmp.name
+
+        try:
+            config = RankingConfig.load_from_file(tmp_path)
+
+            # Unlisted alert for Sage
+            job_sage = JobAlert(
+                title="Senior Engineer", company="Sage", raw_salary=None,
+                min_annual_salary=None, max_annual_salary=None,
+                sort_key_salary=0.0, url_or_contact=None, source_email_subject="",
+                company_alumni=60
+            )
+            config.apply_to_job(job_sage)
+            self.assertEqual(job_sage.sort_key_salary, 2620000.0)
+            self.assertEqual(job_sage.currency, "₹")
+            self.assertEqual(job_sage.normalized_annual_summary, "₹2,620,000/yr (Target)")
+
+            # Unlisted alert for Cisco
+            job_cisco = JobAlert(
+                title="Software Engineer IV", company="Cisco", raw_salary=None,
+                min_annual_salary=None, max_annual_salary=None,
+                sort_key_salary=0.0, url_or_contact=None, source_email_subject="",
+                company_alumni=2808
+            )
+            config.apply_to_job(job_cisco)
+            self.assertEqual(job_cisco.sort_key_salary, 5104697.0)
+            self.assertEqual(job_cisco.currency, "₹")
+            self.assertEqual(job_cisco.normalized_annual_summary, "₹5,104,697/yr (Target)")
+
+            # Unlisted alert with no target salary in rankings.csv
+            job_other = JobAlert(
+                title="Engineer", company="OtherCo", raw_salary=None,
+                min_annual_salary=None, max_annual_salary=None,
+                sort_key_salary=0.0, url_or_contact=None, source_email_subject="",
+                company_alumni=10000
+            )
+            config.apply_to_job(job_other)
+            self.assertEqual(job_other.sort_key_salary, 0.0)
+            self.assertEqual(job_other.normalized_annual_summary, "Unlisted")
+
+            # Alert with actual listed salary in email ($100k) should NOT be overridden by target salary
+            job_with_email_salary = JobAlert(
+                title="Software Engineer IV", company="Cisco", raw_salary="$100k",
+                min_annual_salary=100000.0, max_annual_salary=100000.0,
+                sort_key_salary=100000.0, url_or_contact=None, source_email_subject=""
+            )
+            config.apply_to_job(job_with_email_salary)
+            self.assertEqual(job_with_email_salary.sort_key_salary, 100000.0)
+            self.assertEqual(job_with_email_salary.normalized_annual_summary, "$100,000/yr")
+
+            # Check sorting order: Cisco ($5.1M) -> Sage ($2.6M) -> OtherCo (Unlisted, 10k alumni)
+            ranked = JobReporter.rank_and_sort([job_other, job_sage, job_cisco])
+            self.assertEqual(ranked[0].company, "Cisco")
+            self.assertEqual(ranked[1].company, "Sage")
+            self.assertEqual(ranked[2].company, "OtherCo")
         finally:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
